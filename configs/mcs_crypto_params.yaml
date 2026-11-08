@@ -1,0 +1,636 @@
+# =============================================================================
+# MIRAGE-DoH — Metamorphic Cryptographic Shards (MCS) parameters
+# =============================================================================
+#
+# Referenced in the thesis as:
+#   Chapter 3, Section 3.7.1  — Lattice-based KEM integration, code-based div.
+#   Chapter 3, Section 3.7.2  — Threat-calibrated cipher morphing, PQ security
+#   Chapter 3, Section 3.15.1 — Cryptographic agility and morphing efficiency
+#   Chapter 3, Section 1.5.3  — Objective 3: Adaptive cryptographic agility
+#   Chapter 3, Section 3.10.2 — Proposition 1: Control-channel security
+#   Chapter 3, Equations 11-13
+#   Chapter 3, Table 5        — Shard configurations across threat levels
+#   Chapter 3, Table 6        — Quantum key harvesting scenario
+#   Chapter 3, Table 7        — ECDSA timing probe scenario
+#   Chapter 3, Tables 8, 9    — Morph time 8.9 ms / 3.8-9.5 ms range
+#   Chapter 3, Table 4a       — Closest published method per component
+#
+# Loaded by: configs/default_mirage_config.yaml -> components.mcs
+# Consumed by: src/models/mcs.py
+# Tested by:   tests/test_math_utils.py::test_kem_combiner,
+#              tests/test_math_utils.py::test_threat_severity_score,
+#              tests/test_reproduce_tables.py::test_table_5,
+#              tests/test_cli_tools.py::test_mcshard_cli
+#
+# WHAT THIS FILE DOES NOT DO
+#   The thesis states (Section 1.4.1, Section 7.2.3, Table 4a note) that
+#   "no new cryptographic primitive is proposed; all cryptographic components
+#   are existing, standardized or published schemes." This config therefore
+#   does NOT define a new KEM, a new combiner, or a new hardness assumption.
+#   It wires up three existing KEMs (ML-KEM, X25519, Classic McEliece) through
+#   the standard KEM-combiner construction of [135, 156]. Every cryptographic
+#   parameter below carries the standard it comes from (NIST FIPS 203,
+#   RFC 7748, NIST Round 4 Classic McEliece submission). A reviewer who wants
+#   to verify "no new primitive" can diff this file against the three
+#   standards and confirm that every number is copied from them verbatim.
+#
+# Tag legend:
+#   [thesis]   — explicitly stated in the thesis (with section/equation)
+#   [standard] — copied verbatim from a published standard (cited)
+#   [default]  — standard choice from the literature, cited
+#   [derived]  — computed from a thesis value by the formula in the comment
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# 0. Metadata
+# -----------------------------------------------------------------------------
+
+version: "1.0.0"
+component: "mcs"
+thesis_reference: "Chapter 3, Sections 3.7.1-3.7.2, Equations 11-13, Table 5, Section 3.15.1"
+
+
+# -----------------------------------------------------------------------------
+# 1. Threat-severity score ρ_t (Equation 13)
+# -----------------------------------------------------------------------------
+#
+# Equation 13:
+#   ρ_t = σ(W_c · z_t + b_c)                                (Eq. 13a)
+#   C(s_t, z_t) = Π_0  if ρ_t ≤ γ_1
+#                 Π_1  if γ_1 < ρ_t ≤ γ_2
+#                 Π_2  if ρ_t > γ_2                          (Eq. 13b)
+#
+# where z_t is the CMA's intermediate feature vector (the same 46-feature
+# vector the CMA uses, Section 3.11.1), σ is the sigmoid function, and W_c,
+# b_c are learned weights. Section 3.7.2 says γ_1 and γ_2 are "adaptive
+# thresholds".
+
+threat_severity:
+  # Activation function σ. [thesis] Eq. 13a.
+  activation: "sigmoid"
+
+  # W_c and b_c initialization. [default] Xavier-uniform for W_c and zeros
+  # for b_c are the standard initializers that keep the sigmoid output in a
+  # regime where gradients are not saturated, which matters because Eq. 13
+  # is trained jointly with the CMA's HMC optimizer (Section 3.5.5).
+  W_c_init: "xavier_uniform"
+  b_c_init: 0.0
+
+  # Input dimension of z_t. [thesis] Same 46 features as CMA (Section 3.11.1).
+  input_dim: 46
+
+  # The two decision thresholds γ_1, γ_2. [thesis] Section 3.7.2 says
+  # "adaptive thresholds" without giving initial values. We initialize at
+  # the thirds of the sigmoid range (1/3, 2/3) and let them adapt during
+  # training, which is the natural Bayesian prior for a three-way
+  # partition. [default]
+  gamma_1: 0.3333
+  gamma_2: 0.6667
+
+  # Whether γ_1 and γ_2 are learned. [thesis] Section 3.7.2: "adaptive
+  # thresholds" -> learnable.
+  adaptive: true
+
+  # Learning rate for γ_1, γ_2. [default] 1e-3 matches the CMA's learning
+  # rate and is small enough that the thresholds do not oscillate across
+  # the 100-epoch trajectory of Figure 4.
+  gamma_learning_rate: 0.001
+
+  # Bounds on the adapted thresholds. The morphing policy is bounded from
+  # below by Π_0 (Section 3.7.2: "the policy could raise the level of a
+  # shard but never selected a configuration weaker than Π_0"), which is
+  # enforced by `morph.allow_downgrade = false` below. The bounds here
+  # prevent γ_1 from rising above γ_2 or collapsing toward 0 or 1 during
+  # adversarial training.
+  gamma_1_bounds: [0.05, 0.49]
+  gamma_2_bounds: [0.51, 0.95]
+
+
+# -----------------------------------------------------------------------------
+# 2. Base KEM primitives
+# -----------------------------------------------------------------------------
+#
+# Three KEM families are wired together in Eq. 11's combiner:
+#
+#   1. ML-KEM (NIST FIPS 203, formerly Kyber).
+#      Two variants: ML-KEM-768 (Cat 3) and ML-KEM-1024 (Cat 5).
+#
+#   2. X25519 (RFC 7748).
+#      Classical-only KEM; no PQ security, but it is the standard
+#      transitional classical component in a hybrid KEM.
+#
+#   3. Classic McEliece (NIST Round 4 submission).
+#      Code-based KEM at NIST Category 5. We pin to mceliece6688128,
+#      which is the smallest-pk Category 5 set.
+#
+# All parameter sizes below are copied verbatim from the corresponding
+# standards. Do not edit them without changing the citation.
+
+kem_primitives:
+
+  # --- ML-KEM (NIST FIPS 203) -------------------------------------------
+  # Reference: https://csrc.nist.gov/pubs/fips/203/final
+  ml_kem:
+    standard: "NIST FIPS 203"
+    reference_url: "https://csrc.nist.gov/pubs/fips/203/final"
+    variants:
+
+      ml_kem_768:
+        # NIST FIPS 203, Table 3 (ML-KEM-768).
+        nist_category: 3
+        lambda_bits: 192                       # [standard] ~192-bit PQ security
+        pk_bytes: 1184                         # [standard] FIPS 203 Table 3
+        sk_bytes: 2400
+        ct_bytes: 1088
+        ss_bytes: 32
+        encaps_ops_approx: 150000              # rough NTT operations
+
+      ml_kem_1024:
+        # NIST FIPS 203, Table 3 (ML-KEM-1024).
+        nist_category: 5
+        lambda_bits: 256                       # [standard] ~256-bit PQ security
+        pk_bytes: 1568
+        sk_bytes: 3168
+        ct_bytes: 1568
+        ss_bytes: 32
+        encaps_ops_approx: 250000
+
+  # --- X25519 (RFC 7748) -----------------------------------------------
+  # Reference: https://www.rfc-editor.org/rfc/rfc7748
+  x25519:
+    standard: "RFC 7748"
+    reference_url: "https://www.rfc-editor.org/rfc/rfc7748"
+    nist_category: null                        # [standard] no PQ category;
+                                               # X25519 is classical-only
+    lambda_bits_classical: 128                 # [standard] ~128-bit classical
+    pk_bytes: 32
+    sk_bytes: 32
+    ss_bytes: 32
+    encaps_ops_approx: 3000                    # scalar multiplication
+
+  # --- Classic McEliece (NIST Round 4 submission) ----------------------
+  # Reference: https://classic.mceliece.org/nist.html
+  # Selected parameter set: mceliece6688128 (Category 5, smallest pk among
+  # the Category 5 sets). Other Category 5 sets (mceliece6960119,
+  # mceliece8192128) would also satisfy Eq. 12; we pin to 6688128 for
+  # reproducibility of the morph-time figures in Section 3.15.1.
+  classic_mceliece:
+    standard: "NIST PQC Round 4 (Classic McEliece)"
+    reference_url: "https://classic.mceliece.org/nist.html"
+    parameter_set: "mceliece6688128"           # [thesis] "Classic McEliece"
+                                               # Section 1.5.3, Section 3.7.1
+    nist_category: 5
+    lambda_bits: 256                           # [standard] ~256-bit PQ
+    pk_bytes: 1044992                          # ~1.04 MB
+    sk_bytes: 13932
+    ct_bytes: 208                              # small ct is the trade for
+                                               # the huge pk
+    ss_bytes: 32
+    encaps_ops_approx: 50000                   # fast once pk is loaded
+    note: |
+      Classic McEliece has a very large public key (~1 MB). To keep the
+      morph time under 10 ms (Objective 3, Section 1.5.3), the public key
+      is cached in memory at shard initialization and only the
+      encapsulation operation (which is fast) is performed per morph. The
+      3.8-9.5 ms range in Tables 8 and 9 includes this caching assumption.
+
+  # --- Isogeny-based KEMs (EXCLUDED) -----------------------------------
+  # [thesis] Section 1.5.3: "Isogeny-based constructions were not used
+  # because the SIDH scheme was broken by a classical key-recovery attack
+  # in 2022, and the remaining isogeny-based key exchanges are not
+  # standardized."
+  isogeny_based:
+    enabled: false
+    reason: "SIDH broken 2022; remaining isogeny KEMs not standardized"
+
+
+# -----------------------------------------------------------------------------
+# 3. Shard configurations Π₀, Π₁, Π₂ (Eq. 13, Table 5, Section 3.15.1)
+# -----------------------------------------------------------------------------
+#
+# Section 3.15.1 states the three configurations explicitly:
+#   Π_0: ML-KEM-768 with X25519, NIST Category 3
+#   Π_1: ML-KEM-1024 with X25519, NIST Category 5
+#   Π_2: ML-KEM-1024 with Classic McEliece, Category 5, two hardness
+#        assumptions
+#
+# Each shard is a *hybrid* KEM: the two component KEMs are combined by
+# Eq. 11 below, not used independently.
+
+shard_configurations:
+
+  pi_0:
+    # [thesis] Section 3.15.1, Table 5, Eq. 13
+    name: "Π₀ — lowest threat level"
+    lattice_kem: "ml_kem_768"
+    second_kem: "x25519"
+    nist_category: 3
+    # Effective PQ security (Eq. 12): max(λ_1, λ_2) = max(192, null) = 192
+    lambda_pq_min_bits: 192
+    # [thesis] Table 9 morph time 3.8-9.5 ms range; Π₀ is the fastest
+    morph_time_target_ms: 3.8
+    cli_level: "L0"                            # alias for mcshard_cli
+
+
+  pi_1:
+    # [thesis] Section 3.15.1, Table 5, Eq. 13
+    name: "Π₁ — intermediate threat level"
+    lattice_kem: "ml_kem_1024"
+    second_kem: "x25519"
+    nist_category: 5
+    lambda_pq_min_bits: 256
+    morph_time_target_ms: 6.0
+    cli_level: "L1"
+
+
+  pi_2:
+    # [thesis] Section 3.15.1, Table 5, Eq. 13
+    name: "Π₂ — highest threat level"
+    lattice_kem: "ml_kem_1024"
+    second_kem: "classic_mceliece"
+    nist_category: 5
+    # Two hardness assumptions (lattice + code-based); Eq. 12 bound is
+    # max(256, 256) = 256 bits.
+    lambda_pq_min_bits: 256
+    morph_time_target_ms: 9.5
+    cli_level: "L2"
+    note: |
+      Π₂ uses two hardness assumptions (Module-LWE for ML-KEM-1024 and
+      the code-based assumption for Classic McEliece). Proposition 1
+      (Section 3.10.2) means the combined KEM is IND-CCA2 secure if at
+      least one component is IND-CCA2 secure and the KDF is a PRF or
+      random oracle. Therefore Π₂'s effective security is at least
+      max(256, 256) = 256 bits against a quantum adversary that breaks
+      only one of the two families.
+
+
+# -----------------------------------------------------------------------------
+# 4. KEM combiner K_ctrl (Equation 11)
+# -----------------------------------------------------------------------------
+#
+# Equation 11:
+#   K_ctrl = KDF(ss_1 ‖ ss_2 ‖ ct_1 ‖ ct_2 ‖ ctx)             (Eq. 11a)
+#   with (ct_i, ss_i) ← Encaps_i(pk_i) for i ∈ {1, 2}         (Eq. 11b)
+#
+# Section 3.7.1: "Hashing both shared secrets, both ciphertexts and the
+# session context into one key kept the control plane confidential as long
+# as at least one of the two KEMs was secure."
+#
+# Reference: Matsuda & Schuldt, ISITA 2018 [135]; Panja et al., TCS 2025
+# [156]. Proposition 1 (Section 3.10.2) instantiates this standard result
+# with SHA-256 as the KDF.
+
+kem_combiner:
+
+  # [thesis] KDF. Section 3.10.2 Proposition 1 requires "KDF is a
+  # pseudorandom function, or a random oracle". SHA-256 is a PRF under the
+  # standard assumption that SHA-256 is collision-resistant and its
+  # compression function is a PRF in the Merkle-Damgård construction
+  # (Bellare, Canetti & Krawczyk, CRYPTO 1996).
+  kdf: "SHA-256"
+
+  # Output length of the control-plane key. [thesis] Section 3.7.2:
+  # "Symmetric keys were kept at 256 bits, so that Grover-type search did
+  # not reduce them below 128 bits."
+  kdf_output_bits: 256
+
+  # Order of fields in the KDF input. [thesis] Eq. 11a: ss_1 ‖ ss_2 ‖ ct_1
+  # ‖ ct_2 ‖ ctx. This order is fixed by the combiner literature [135,
+  # 156]; changing it is not permitted without re-deriving Proposition 1.
+  field_order:
+    - shared_secret_1
+    - shared_secret_2
+    - ciphertext_1
+    - ciphertext_2
+    - session_context
+
+  # Session context fields. [thesis] Eq. 11b: "ctx was the session
+  # context". Standard TLS-like context for a DNS-over-X session.
+  session_context_fields:
+    - session_id                              # 128-bit random per session
+    - timestamp_ms                            # unix epoch ms, for replay
+                                              # protection
+    - protocol_version                        # {doh, dot, doq} + version
+    - shard_id                                # which shard derived this key
+    - threat_score                            # the ρ_t value that selected
+                                              # the shard (audit trail)
+
+  # Length-prefix encoding: prepend the byte-length of each field before
+  # the bytes, so that ss_1=0x00 || ss_2=0x00 hashes differently from
+  # ss_1=0x0000 || ss_2=(empty). Standard encoding for concatenation-based
+  # KDFs.
+  length_prefix: true
+
+  # Domain separation tag. [default] "MIRAGE-DoH-MCS-v1" is prepended to
+  # every KDF input, so that a MIRAGE-DoH shard cannot be tricked into
+  # producing a key identical to that of any other protocol that uses the
+  # same KDF. Standard practice per NIST SP 800-108.
+  domain_separation_tag: "MIRAGE-DoH-MCS-v1"
+
+  # Number of hash rounds. [default] 1 is standard for a single-output KDF
+  # whose output is shorter than the hash function. Increase to 2 if the
+  # output length is later raised to 512 bits.
+  rounds: 1
+
+
+# -----------------------------------------------------------------------------
+# 5. Post-quantum security levels (Equation 12)
+# -----------------------------------------------------------------------------
+#
+# Equation 12:
+#   λ_PQ ≥ max(λ_1, λ_2)
+#
+# Section 3.7.2: "the effective post-quantum security level of a combined
+# shard was bounded from below by [max(λ_1, λ_2)] where λ_1 and λ_2 were
+# the security levels of the two key-encapsulation mechanisms that made up
+# the shard, taken from their published specifications".
+#
+# The claim is conditional on the standard hardness assumptions (Module-LWE
+# for ML-KEM, the classical code-based assumption for McEliece, and the
+# Diffie-Hellman assumption on Curve25519 for X25519). Section 7.3.5 of the
+# thesis is explicit: "Only the selected KEMs are believed to be quantum
+# resistant, and there is no independent quantum-security reduction."
+
+security:
+
+  # Symmetric key length. [thesis] Section 3.7.2: 256 bits.
+  symmetric_key_bits: 256
+
+  # Effective symmetric security after Grover's algorithm. [thesis]
+  # Section 3.7.2: "Grover-type search did not reduce them below 128 bits."
+  symmetric_effective_bits_after_grover: 128
+
+  # Effective PQ security of each shard, per Eq. 12.
+  shard_effective_lambda_pq_bits:
+    pi_0: 192                                  # max(192, 0)  [derived]
+    pi_1: 256                                  # max(256, 0)  [derived]
+    pi_2: 256                                  # max(256, 256) [derived]
+
+  # The claim, restated as the thesis states it (Section 7.3.5, Section
+  # 3.7.2 footnote):
+  claim_scope: |
+    "The effective post-quantum security level of a combined shard is
+     bounded from below by max(lambda_1, lambda_2). The claim is
+     conditional on the standard hardness assumptions (Module-LWE, the
+     classical code-based assumption, and the X25519 Diffie-Hellman
+     assumption). It is a reduction, not a theorem about a specific
+     adversary: no independent quantum-security reduction is claimed,
+     and Section 7.3.5 of the thesis states this limit explicitly."
+
+
+# -----------------------------------------------------------------------------
+# 6. Symmetric cipher suite (per Section 3.7.2)
+# -----------------------------------------------------------------------------
+#
+# The output of the KEM combiner (Eq. 11) is a 256-bit control-plane key.
+# That key is used to encrypt the actual DoH/DoT/DoQ session metadata
+# under an authenticated cipher. AES-256-GCM is chosen because:
+#   - It is FIPS 140-3 validated (NIST SP 800-38D).
+#   - It is a 256-bit key as required by Section 3.7.2.
+#   - It provides authenticated encryption, which is what the "control-
+#     plane security argument" (Section 3.10.2) needs.
+
+symmetric:
+  cipher: "AES-256-GCM"                        # [standard] NIST SP 800-38D
+  key_bits: 256                                # [thesis] Section 3.7.2
+  nonce_bits: 96                               # [standard] NIST SP 800-38D
+  tag_bits: 128                                # [standard] NIST SP 800-38D
+  nonce_derivation: "counter"                  # [default] sequential nonce
+                                               # from a per-key counter;
+                                               # avoids the birthday bound
+  reference: "NIST SP 800-38D, Section 8.2"
+
+
+# -----------------------------------------------------------------------------
+# 7. Morph protocol (Section 3.15.1, Section 3.7.2)
+# -----------------------------------------------------------------------------
+#
+# The shard transitions between configurations Π_0, Π_1, Π_2 based on the
+# threat score from Section 1 above. The transition protocol is the
+# "cryptographic morphogenesis" of Section 3.7.2.
+
+morph:
+
+  # --- Policy invariants (Eq. 13, Section 3.7.2) -----------------------
+  # [thesis] Section 3.7.2: "the policy could raise the level of a shard
+  # but never selected a configuration weaker than Π_0. Consequently, an
+  # adversary that influenced ρ_t could not force a downgrade below Π_0."
+  allow_downgrade: false
+  baseline_level: "pi_0"
+  policy_floor: "pi_0"                         # enforced as a cross-field
+                                               # constraint below
+
+  # --- Re-randomization and padding (Section 3.7.2) --------------------
+  # [thesis] Section 3.7.2: "Each MCS used a cryptographic morphogenesis
+  # protocol in which its internal cipher configuration was reconfigured
+  # by stochastic re-randomization and padding techniques intended to
+  # increase the cost of traffic-analysis and side-channel observation."
+  re_randomization: true
+  re_randomization_entropy_source: "os.urandom"  # [default] standard OS
+                                                  # entropy; in production,
+                                                  # swap for a hardware
+                                                  # TRNG if available
+  re_randomization_bytes: 32                   # [default] 32 bytes of fresh
+                                               # entropy per morph
+  adaptive_padding: true
+  padding_bytes_range: [64, 256]               # [default] standard Tor-style
+                                               # padding range; Section 3.7.2
+                                               # says "adaptive padding"
+                                               # without a numeric range,
+                                               # this range covers the
+                                               # 1000-100000 QPS range of
+                                               # Section 3.4.2 without
+                                               # excessive overhead
+  padding_distribution: "uniform"
+
+  # --- Morph trigger sources -------------------------------------------
+  # Which detections can trigger a morph. [thesis] Tables 6 and 7.
+  trigger_sources:
+    - cma_threat_score_exceeds_gamma           # Eq. 13, Table 6
+    - cma_novelty_score_exceeds_threshold      # Table 6, Table 7
+    - timing_variance_exceeds_threshold        # Table 7, mcshard_monitor
+    - explicit_operator_command                # Table 6, mcshard --morph
+
+  # The timing-variance threshold from Table 7's `mcshard_monitor
+  # --variance=0.5μs` command. This is a μs-level ECDSA timing probe
+  # (Table 7 row 2): if the observed timing variance exceeds 0.5 μs, the
+  # shard escalates to Π_2.
+  timing_variance_threshold_us: 0.5            # [thesis] Table 7
+
+  # --- Morph time targets (Tables 8, 9, Section 3.15.1) ----------------
+  # [thesis] Section 1.5.3, Objective 3: "switch between them in under 10
+  # milliseconds." Achieved 3.8-9.5 ms (Table 9); 8.9 ± 0.3 ms (Table 8).
+  target_morph_time_ms: 10.0                   # [thesis] Objective 3
+  measured_morph_time_ms_range: [3.8, 9.5]     # [thesis] Table 9
+  measured_morph_time_ms_median: 8.9           # [thesis] Table 8
+  measured_morph_time_ms_ci: 0.3               # [thesis] Table 8, 95% CI
+  measurement_benchmark_iterations: 1000       # [thesis] Table 9
+                                               # validation_command
+                                               # mcshard_speedtest --iter=1000
+
+  # --- CLI flag mapping (Tables 6 and 7) -------------------------------
+  # These map the exact CLI flags in the thesis to the config values.
+  cli_flags:
+    table_6_quantum_key_harvesting:
+      command: "mcshard --morph --level=L2"
+      maps_to: { mcs.morph.target_level: "L2" }
+    table_7_ecdsa_probe:
+      command: "mcshard_monitor --variance=0.5μs"
+      maps_to: { mcs.morph.timing_variance_threshold_us: 0.5 }
+    table_9_speedtest:
+      command: "mcshard_speedtest --iter=1000"
+      maps_to: { mcs.morph.measurement_benchmark_iterations: 1000 }
+
+
+# -----------------------------------------------------------------------------
+# 8. Reported values (cross-reference)
+# -----------------------------------------------------------------------------
+#
+# These are the values reported in the thesis. They are not hyperparameters;
+# they are the targets against which `verification_script.py` checks a
+# fresh run.
+
+reported_values:
+
+  # Table 5: Shard configurations of the Metamorphic Cryptographic Shards
+  # across threat levels. [thesis] Table 5.
+  table_5_shard_configurations:
+    pi_0:
+      lattice_kem: "ML-KEM-768"
+      second_kem: "X25519"
+      nist_category: 3
+      lambda_pq_min_bits: 192
+      morph_time_ms: 3.8
+    pi_1:
+      lattice_kem: "ML-KEM-1024"
+      second_kem: "X25519"
+      nist_category: 5
+      lambda_pq_min_bits: 256
+      morph_time_ms: 6.0
+    pi_2:
+      lattice_kem: "ML-KEM-1024"
+      second_kem: "Classic McEliece"
+      nist_category: 5
+      lambda_pq_min_bits: 256
+      morph_time_ms: 9.5
+
+  # Table 6: Quantum key harvesting scenario.
+  # [thesis] Table 6, row 2.
+  table_6_quantum_key_harvesting:
+    attack_method: "Side-channel timing analysis for lattice basis extraction"
+    vulnerability_exploited: "Fixed KEM parameters"
+    mirage_doh_response: |
+      "MCS escalates to Π₂ (ML-KEM-1024 + Classic McEliece) + lattice
+       re-randomization"
+    command: "mcshard --morph --level=L2"
+
+  # Table 7: ECDSA timing probe scenario.
+  # [thesis] Table 7, row 2.
+  table_7_ecdsa_probe:
+    attacker_action: "ECDSA timing probe using TLS-Attacker"
+    detection: "MCS detects μs-level variance"
+    defense_action: "Escalate to Π₂ shard, add lattice noise"
+    validation_command: "mcshard_monitor --variance=0.5μs"
+
+  # Table 8: Core performance metrics vs. baseline.
+  # [thesis] Table 8, Morph Time row.
+  table_8:
+    morph_time_ms: 8.9
+    morph_time_ci_95: 0.3
+    improvement_vs_cnn_lstm: "n/a (no baseline capability)"
+    improvement_vs_random_forest: "n/a (no baseline capability)"
+
+  # Table 9: Advanced threat mitigation performance.
+  # [thesis] Table 9, Crypto Morph Time row.
+  table_9:
+    morph_time_ms_range: [3.8, 9.5]
+    validation_command: "mcshard_speedtest --iter=1000"
+    note: |
+      "The enhancement ratio is given only where both systems measure the
+       same quantity. Row 3 compares a measured morphing time against a
+       capability that legacy DoH does not have; no ratio is defined."
+
+  # Section 3.15.1: Cryptographic agility and morphing efficiency.
+  # [thesis] Section 3.15.1.
+  section_3_15_1:
+    pi_0: "ML-KEM-768 with X25519, NIST Category 3"
+    pi_1: "ML-KEM-1024 with X25519, NIST Category 5"
+    pi_2: "ML-KEM-1024 with Classic McEliece, two hardness assumptions,
+           Category 5"
+    end_to_end_morph_time_ms_range: [3.8, 9.5]
+    end_to_end_morph_time_ms_median: 8.9
+    end_to_end_morph_time_ms_ci: 0.3
+    target_met: true
+    no_performance_degradation_observed: true
+
+  # Section 3.10.2 Proposition 1.
+  # [thesis] Section 3.10.2.
+  proposition_1:
+    statement: |
+      "If at least one of KEM_1 and KEM_2 is IND-CCA2 secure and KDF is a
+       pseudorandom function, or a random oracle, then the combined KEM
+       that outputs K_ctrl is IND-CCA2 secure."
+    reference: "Standard key-combiner result from [135, 156]"
+    proof_status: "Cited, not re-derived (Section 3.10.2)"
+    consequence: |
+      "The threat policy of Eq. 13 selects only among Π_0, Π_1, Π_2,
+       with Π_0 the lowest security tier. Proposition 1 therefore holds
+       for every configuration the policy can select, and an adversary
+       who influenced ρ_t could not lower the security of the control
+       plane below that of Π_0."
+
+
+# -----------------------------------------------------------------------------
+# 9. Validation rules
+# -----------------------------------------------------------------------------
+# Consumed by src/utils/config_validator.py. A violation aborts the run
+# before any cryptographic parameter is used.
+
+validation:
+
+  # Numeric bounds.
+  gamma_1: {min: 0.0, max: 1.0}
+  gamma_2: {min: 0.0, max: 1.0}
+  kdf_output_bits: {min: 128, max: 512}
+  symmetric_key_bits: {min: 128, max: 512}
+  re_randomization_bytes: {min: 16, max: 128}
+  target_morph_time_ms: {min: 1.0, max: 100.0}
+  timing_variance_threshold_us: {min: 0.01, max: 100.0}
+
+  # Cross-field constraints. Every one of these maps to an explicit claim
+  # in the thesis.
+  _constraints:
+    - "gamma_1 < gamma_2"                       # Eq. 13b, monotone in rho
+    - "pi_0.nist_category == 3"                 # Section 3.15.1
+    - "pi_1.nist_category == 5"                 # Section 3.15.1
+    - "pi_2.nist_category == 5"                 # Section 3.15.1
+    - "pi_0.lambda_pq_min_bits == 192"          # Eq. 12: max(192, null)
+    - "pi_1.lambda_pq_min_bits == 256"          # Eq. 12: max(256, null)
+    - "pi_2.lambda_pq_min_bits == 256"          # Eq. 12: max(256, 256)
+    - "symmetric_key_bits == 256"               # Section 3.7.2
+    - "symmetric_effective_bits_after_grover == 128"  # Section 3.7.2
+    - "morph.allow_downgrade == false"          # Section 3.7.2
+    - "morph.policy_floor == 'pi_0'"            # Section 3.7.2
+    - "morph.target_morph_time_ms <= 10.0"      # Objective 3, Section 1.5.3
+    - "morph.measured_morph_time_ms_median <= 10.0"   # Table 8
+    - "kem_primitives.isogeny_based.enabled == false"  # Section 1.5.3
+
+
+# -----------------------------------------------------------------------------
+# 10. Runtime checks
+# -----------------------------------------------------------------------------
+
+runtime_check:
+  # Warn if an actual morph takes longer than the 10 ms target.
+  warn_if_morph_over_ms: 10.0
+  # Warn if the KDF step alone takes more than 1 ms.
+  warn_if_kdf_over_ms: 1.0
+  # Assert the symmetric key is exactly 256 bits (not 128, not 512).
+  assert_symmetric_key_bits: 256
+  # Assert the PQ security bound from Eq. 12 is satisfied for the active
+  # shard. Fails the run if not.
+  assert_effective_lambda_pq: true
+  # Emit a warning if any shard uses a KEM whose NIST category is below
+  # the shard's declared category (defensive: catches config typos).
+  warn_if_kem_category_mismatch: true
