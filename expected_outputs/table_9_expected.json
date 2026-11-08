@@ -1,0 +1,8 @@
+{
+  "attack_detection_time_ratio": 6.9,
+  "fpr_reduction_ratio": 42.0,
+  "morph_time_ms_range": [3.8, 9.5],
+  "topological_recall_ratio": 1.44,
+  "spectral_precision_ratio": 1.56,
+  "zero_day_response_ms_range": [22, 35]
+}
