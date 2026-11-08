@@ -1,0 +1,6 @@
+{
+  "initialization": {"f1": 92.4, "auc_roc": 0.934, "novelty_detection_rate_pct": 85.1, "catastrophic_forgetting_rate_pct": 8.3},
+  "phase_1_static": {"f1": 97.8, "auc_roc": 0.982, "novelty_detection_rate_pct": 93.6, "catastrophic_forgetting_rate_pct": 2.1},
+  "phase_2_dynamic": {"f1": 99.1, "auc_roc": 0.997, "novelty_detection_rate_pct": 98.5, "catastrophic_forgetting_rate_pct": 0.4},
+  "phase_3_live": {"f1": 99.7, "auc_roc": 0.999, "novelty_detection_rate_pct": 99.8, "catastrophic_forgetting_rate_pct": 0.0}
+}
