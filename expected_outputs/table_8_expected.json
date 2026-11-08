@@ -1,0 +1,5 @@
+{
+  "mirage_doh": {"accuracy_pct": 99.98, "fpr_pct": 0.0008, "latency_median_us": 78, "throughput_m_qps": 15.3, "morph_time_ms": 8.9, "morph_time_ci_95_ms": 0.3},
+  "cnn_lstm": {"accuracy_pct": 95.5, "fpr_pct": 0.15, "latency_median_us": 210, "throughput_m_qps": 8.7},
+  "random_forest": {"accuracy_pct": 92.3, "fpr_pct": 0.42, "latency_median_us": 155, "throughput_m_qps": 4.2}
+}
