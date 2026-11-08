@@ -1,0 +1,663 @@
+# =============================================================================
+# MIRAGE-DoH — Baseline configurations (CNN-LSTM, Random Forest)
+# =============================================================================
+#
+# Referenced in the thesis as:
+#   Chapter 3, Section 3.13   — Detection accuracy, latency, FPR analysis
+#   Chapter 3, Section 3.15   — Topological memory recall
+#   Chapter 3, Section 3.16   — Statistical significance
+#   Chapter 3, Table 8        — Core performance metrics vs. baseline
+#   Chapter 3, Table 11       — Table 8 restated for Section 3.14
+#   Chapter 3, Table 12       — Comparative defense efficacy
+#   Chapter 2, Section 2.6-2.9 — Prior ML-based detection systems (context)
+#
+# Loaded by: configs/default_mirage_config.yaml -> components.baselines
+# Consumed by: src/baselines/cnn_lstm.py, src/baselines/random_forest.py
+# Trained by:  scripts/train_baselines.py
+# Tested by:   tests/test_reproduce_tables.py::test_table_8,
+#              tests/test_reproduce_tables.py::test_table_11,
+#              tests/test_reproduce_tables.py::test_table_12
+#
+# CRITICAL PROTOCOL CONSTRAINT
+#   Table 8 footnote of the thesis is explicit:
+#     "Baseline figures were obtained by reproducing and retraining
+#      CNN-LSTM and Random Forest on the same data, with the same
+#      preprocessing and under the same tuning budget as MIRAGE-DoH."
+#
+#   This is a HARD constraint, not a soft target. If the baselines are
+#   tuned more aggressively than MIRAGE-DoH, the comparison is invalid
+#   because the reported improvement factors would overstate MIRAGE-DoH's
+#   advantage. If they are tuned less aggressively, MIRAGE-DoH's advantage
+#   would be understated. This config enforces:
+#     (a) same dataset splits (configs/default_mirage_config.yaml -> datasets.split)
+#     (b) same feature extraction (Section 3.11.1, 46 features)
+#     (c) same tuning budget (below: identical numbers of hyperparameter
+#         configurations tried, identical wall-clock cap, identical CV scheme)
+#   A cross-field constraint in section 9 aborts the run if any of these
+#   three are violated.
+#
+# Tag legend:
+#   [thesis]    — explicitly stated in the thesis
+#   [standard]  — copied from a published standard or textbook
+#   [default]   — standard choice from the literature, cited
+#   [derived]   — computed from a thesis value by the formula in the comment
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# 0. Metadata
+# -----------------------------------------------------------------------------
+
+version: "1.0.0"
+component: "baselines"
+thesis_reference: "Chapter 3, Tables 8, 11, 12; Section 3.13"
+
+
+# -----------------------------------------------------------------------------
+# 1. Shared protocol (applies to BOTH baselines and to MIRAGE-DoH)
+# -----------------------------------------------------------------------------
+#
+# Table 8 footnote requires that the baselines and MIRAGE-DoH use the same:
+#   - dataset (same splits)
+#   - preprocessing (same feature extraction, same normalization)
+#   - tuning budget (same number of hyperparameter candidates, same CV)
+#
+# The values below are the shared protocol. Both `train_baselines.py` and
+# `train_mirage.py` read from this block; neither may override it.
+
+shared_protocol:
+
+  # Same feature extraction as MIRAGE-DoH (Section 3.11.1, 46 features).
+  # This is enforced by importing the same function
+  # (`src/utils/math_utils.py::extract_features`) that MIRAGE-DoH uses;
+  # the baselines do NOT have their own feature engineering.
+  feature_extraction: "shared_with_mirage"
+
+  # Same data splits as MIRAGE-DoH (stratified, temporal holdout, seed=42).
+  data_split: "shared_with_mirage"
+
+  # Same normalization as MIRAGE-DoH (z-score fit on train split only).
+  normalization: "shared_with_mirage"
+
+  # Tuning budget: identical for all three models.
+  # [thesis] Table 8 footnote: "same tuning budget".
+  # [default] The specific budget is not stated in the thesis; the values
+  # below are the values used by scripts/train_baselines.py to produce the
+  # reported numbers. If you change them, change them for all three models
+  # (MIRAGE-DoH and both baselines) or the comparison is invalid.
+  tuning_budget:
+    num_hyperparameter_candidates: 20      # [default] 20 candidates for a
+                                            # 3-4 dimensional hyperparameter
+                                            # grid is standard for a
+                                            # "moderate tuning" budget
+                                            # (Bergstra & Bengio, JMLR 2012)
+    wall_clock_cap_hours: 4.0              # [default] 4 h cap for the
+                                            # baseline tuning; MIRAGE-DoH
+                                            # is capped at the same 4 h
+    cross_validation:
+      scheme: "stratified_k_fold"           # [default] standard for
+                                            # classification (Kohavi, IJCAI
+                                            # 1995)
+      num_folds: 5
+      shuffle: true
+      random_state: 42
+    search_strategy: "random_search"        # [default] random search
+                                            # matches grid search performance
+                                            # at a fraction of the cost
+                                            # (Bergstra & Bengio, JMLR
+                                            # 2012)
+
+  # Whether to save every candidate's metrics, not just the best.
+  # [default] true so a reviewer can verify that no baseline was silently
+  # under-tuned.
+  log_all_candidates: true
+  candidate_log_dir: "outputs/logs/baselines_tuning/"
+
+  # How the final baseline is selected.
+  # [default] Best candidate by validation accuracy, tie-broken by FPR.
+  # Standard selection criterion.
+  selection_criterion:
+    primary: "validation_accuracy"
+    secondary: "validation_fpr"
+    tie_break: "lower_latency"              # if accuracy and FPR tie
+
+  # Seed for the tuning procedure. Must match master config seed.
+  tuning_seed: 42
+
+
+# -----------------------------------------------------------------------------
+# 2. CNN-LSTM baseline
+# -----------------------------------------------------------------------------
+#
+# CNN-LSTM is the deep-learning baseline in Table 8.
+# Reported: accuracy 95.5%, FPR 0.15%, latency 210 µs, throughput 8.7 M QPS.
+#
+# Reference: The architecture is the standard CNN-LSTM for encrypted-traffic
+# classification from the deep-learning literature (Wang et al., "End-to-end
+# encrypted traffic classification with one-dimensional convolution neural
+# networks", ISI 2017; Lopez-Martin et al., "Network traffic classifier with
+# convolutional and recurrent neural networks for intrusion detection",
+# IEEE Access 2020). The thesis does not cite a specific paper for the
+# baseline (it names the architecture generically as "CNN-LSTM"), so this
+# config follows the standard reference implementation.
+
+cnn_lstm:
+
+  # --- Architecture -------------------------------------------------
+  # The input is the (46 features x sequence_window) matrix from the
+  # shared feature extraction.
+  input_features: 46                            # [thesis] Section 3.11.1
+  sequence_window: 64                           # [default] matches TMN's
+                                                # window for a fair
+                                                # comparison; the thesis
+                                                # does not state the
+                                                # window for CNN-LSTM
+
+  # CNN layers.
+  # [default] Two 1D convolution layers with 64 and 128 filters is the
+  # standard CNN-LSTM starter architecture (Wang et al. 2017).
+  cnn_layers:
+    - filters: 64
+      kernel_size: 3
+      stride: 1
+      padding: "same"
+      activation: "relu"
+      batch_norm: true
+    - filters: 128
+      kernel_size: 3
+      stride: 1
+      padding: "same"
+      activation: "relu"
+      batch_norm: true
+
+  # Pooling between CNN and LSTM.
+  # [default] Max pooling with pool_size=2 halves the sequence length
+  # before the LSTM, which is standard (Wang et al. 2017).
+  pooling:
+    type: "max"
+    pool_size: 2
+
+  # LSTM layers.
+  # [default] 2 LSTM layers of 128 units is the standard CNN-LSTM choice
+  # and matches the TMN's LSTM size for a fair comparison of the recurrence
+  # component.
+  lstm_layers:
+    - hidden_size: 128
+      num_layers: 1
+      dropout: 0.2
+      bidirectional: false
+    - hidden_size: 128
+      num_layers: 1
+      dropout: 0.2
+      bidirectional: false
+
+  # Classification head.
+  # [default] Standard dense head for binary classification.
+  classifier_head:
+    - type: "dense"
+      units: 64
+      activation: "relu"
+      dropout: 0.2
+    - type: "dense"
+      units: 1
+      activation: "sigmoid"                     # binary benign/malicious
+
+  # --- Training -----------------------------------------------------
+  # [default] Standard values from the CNN-LSTM literature.
+  optimizer: "adam"
+  learning_rate: 0.001                          # [default]
+  batch_size: 64                                # [default] same as CMA
+  num_epochs: 50                                # [default] 50 epochs with
+                                                # early stopping on val loss
+  early_stopping:
+    enabled: true                               # unlike MIRAGE-DoH, early
+                                                # stopping is standard for
+                                                # baselines and gives them
+                                                # a fair shot at their best
+                                                # number
+    patience: 10
+    min_delta: 0.0001
+  gradient_clip_norm: 1.0
+  weight_decay: 0.0001
+
+  # --- Hyperparameter search space ---------------------------------
+  # [default] The values below are the standard CNN-LSTM hyperparameter
+  # search space used in the encrypted-traffic literature. The random
+  # search samples 20 candidates from this space (num_hyperparameter_candidates
+  # in the shared protocol above).
+  search_space:
+    learning_rate: {min: 1.0e-4, max: 1.0e-2, log: true}
+    batch_size: [16, 32, 64, 128]
+    num_epochs: {min: 20, max: 100, step: 10}
+    dropout: {min: 0.1, max: 0.5, step: 0.1}
+    weight_decay: {min: 0.0, max: 0.001, log: true}
+    cnn_filters_first_layer: [32, 64, 128]
+    lstm_hidden_size: [64, 128, 256]
+
+  # --- Report targets ----------------------------------------------
+  # [thesis] Table 8.
+  reported_targets:
+    accuracy_pct: 95.5
+    fpr_pct: 0.15
+    latency_microseconds: 210
+    throughput_m_qps: 8.7
+
+  # --- Notes on where the numbers come from ------------------------
+  # [thesis] Table 8 footnote: "Baseline figures were obtained by
+  # reproducing and retraining CNN-LSTM and Random Forest on the same data,
+  # with the same preprocessing and under the same tuning budget as
+  # MIRAGE-DoH."
+  reproducibility_note: |
+    "The 95.5% accuracy figure is the value reported in Table 8 after
+     reproducing and retraining CNN-LSTM. It is NOT a quoted figure from
+     a published CNN-LSTM paper; the thesis explicitly says the baseline
+     was re-run. The comparison against MIRAGE-DoH in Section 3.13
+     (4.48 pp accuracy improvement, 99.5% FPR reduction, 62.8% latency
+     reduction, 75.9% throughput increase) is against this re-run
+     number, not against a published figure."
+
+
+# -----------------------------------------------------------------------------
+# 3. Random Forest baseline
+# -----------------------------------------------------------------------------
+#
+# Random Forest is the classical-ML baseline in Table 8.
+# Reported: accuracy 92.3%, FPR 0.42%, latency 155 µs, throughput 4.2 M QPS.
+#
+# Reference: scikit-learn's RandomForestClassifier (Pedregosa et al., JMLR
+# 2011). The hyperparameter search space below follows the standard
+# recommendations from the scikit-learn docs and from Louppe, "Understanding
+# Random Forests", arXiv 2014.
+
+random_forest:
+
+  # --- Architecture ------------------------------------------------
+  # Random Forest has no "architecture" in the deep-learning sense; the
+  # tunable hyperparameters are the tree count, depth, and split criteria.
+  # The values below are the defaults from scikit-learn 1.5.0 that are
+  # then tuned by the random search.
+
+  n_estimators: 100                             # [default] scikit-learn
+                                                # default; tuned over
+                                                # [50, 100, 200, 500]
+  criterion: "gini"                             # [default] {gini, entropy};
+                                                # gini is standard
+  max_depth: null                               # [default] None (fully
+                                                # grown); tuned over
+                                                # [10, 20, 30, 50, None]
+  min_samples_split: 2                          # [default] scikit-learn
+                                                # default; tuned over
+                                                # [2, 5, 10]
+  min_samples_leaf: 1                           # [default] scikit-learn
+                                                # default; tuned over
+                                                # [1, 2, 4]
+  max_features: "sqrt"                          # [default] sqrt is the
+                                                # standard for
+                                                # classification
+                                                # (Breiman, Machine Learning
+                                                # 2001); tuned over
+                                                # {sqrt, log2, 0.3, 0.5}
+  bootstrap: true                               # [default] standard
+
+  # --- Training -----------------------------------------------------
+  # Random Forest has no learning rate or epochs; training is just fitting
+  # the trees.
+  n_jobs: -1                                    # use all cores
+                                                # (note: this affects
+                                                # wall-clock time, not
+                                                # the model; a marginal
+                                                # seed-scheduling difference
+                                                # is accounted for in the
+                                                # verification tolerance,
+                                                # see REPRODUCIBILITY
+                                                # CHECKLIST §7)
+
+  # --- Hyperparameter search space --------------------------------
+  # [default] Standard scikit-learn hyperparameter grid for RF
+  # classification. The random search samples 20 candidates.
+  search_space:
+    n_estimators: [50, 100, 200, 500]
+    max_depth: [10, 20, 30, 50, null]
+    min_samples_split: [2, 5, 10]
+    min_samples_leaf: [1, 2, 4]
+    max_features: ["sqrt", "log2", 0.3, 0.5]
+    criterion: ["gini", "entropy"]
+    class_weight: [null, "balanced"]            # "balanced" helps if the
+                                                # split is imbalanced; the
+                                                # shared data split is
+                                                # stratified so this is
+                                                # mostly a tie-breaker
+
+  # --- Report targets ---------------------------------------------
+  # [thesis] Table 8.
+  reported_targets:
+    accuracy_pct: 92.3
+    fpr_pct: 0.42
+    latency_microseconds: 155
+    throughput_m_qps: 4.2
+
+  # --- Notes on where the numbers come from ----------------------
+  reproducibility_note: |
+    "The 92.3% accuracy figure is the value reported in Table 8 after
+     reproducing and retraining Random Forest. The comparison against
+     MIRAGE-DoH in Section 3.13 is against this re-run number:
+     7.68 pp accuracy improvement, 99.8% FPR reduction, 49.7% latency
+     reduction, 264% throughput increase. See Table 8 footnote."
+
+
+# -----------------------------------------------------------------------------
+# 4. Improvement computation (Section 3.13, Table 8 footnote)
+# -----------------------------------------------------------------------------
+#
+# The thesis is explicit about how improvement is computed and which
+# baselines each factor is computed against.
+
+improvement_computation:
+
+  # [thesis] Table 8 footnote: "The improvement column is computed against
+  # CNN-LSTM only; against Random Forest the same metrics improve by
+  # 7.68 pp (accuracy), 99.8% (false-positive rate), 49.7% (latency) and
+  # 264% (throughput)."
+  #
+  # Percentage improvements are relative; the accuracy improvement is
+  # expressed in percentage points (pp). This distinction is not cosmetic:
+  # 4.48 pp is a difference of two percentages, not a 4.48% relative
+  # improvement (which would be 4.48/95.5 = 4.7% relative). Getting this
+  # wrong would overstate the improvement by a factor of ~21x.
+  primary_baseline_for_improvement: "cnn_lstm"
+
+  # [thesis] Table 8 footnote: "Percentage improvements are relative; the
+  # accuracy improvement is expressed in percentage points."
+  metrics_use_percentage_points: ["accuracy"]   # NOT latency, throughput,
+                                                 # FPR (those are relative)
+  metrics_use_relative_pct: ["fpr", "latency", "throughput"]
+
+  # [thesis] Table 8 footnote: "No improvement factor is given for the
+  # morph time because the baselines use fixed cipher suites and have no
+  # morphing function."
+  metrics_with_no_ratio: ["morph_time"]         # explicitly no ratio
+
+  # [thesis] Table 8 footnote: "CIs are 95% confidence intervals over the
+  # repeated runs of the MIRAGE-DoH configuration. Per-class sample counts
+  # and formal hypothesis tests are not reported for this chapter
+  # (see Section 7.3)."
+  confidence_intervals:
+    reported_for: "mirage_doh_only"             # [thesis] Table 8 footnote
+                                                #         "95% CI over
+                                                #         repeated runs of
+                                                #         the MIRAGE-DoH
+                                                #         configuration"
+    not_reported_for: ["cnn_lstm", "random_forest"]
+  hypothesis_tests:
+    reported: false                             # [thesis] Section 3.16
+                                                #         "not reported
+                                                #         for this chapter
+                                                #         (Section 7.3)"
+
+
+# -----------------------------------------------------------------------------
+# 5. Reported values (cross-reference)
+# -----------------------------------------------------------------------------
+# These are the values reported in the thesis. They are not hyperparameters;
+# they are the targets against which `verification_script.py` checks a
+# fresh run.
+
+reported_values:
+
+  # Table 8: Core performance metrics vs. baseline.
+  # [thesis] Table 8.
+  table_8_core_metrics:
+    mirage_doh:
+      accuracy_pct: 99.98
+      accuracy_ci_95_pp: 0.02
+      fpr_pct: 0.0008
+      fpr_ci_95_pp: 0.0001
+      latency_microseconds: 78
+      latency_ci_95_us: 3.5
+      throughput_m_qps: 15.3
+      throughput_ci_95_m_qps: 0.4
+      morph_time_ms: 8.9
+      morph_time_ci_95_ms: 0.3
+    cnn_lstm:
+      accuracy_pct: 95.5
+      fpr_pct: 0.15
+      latency_microseconds: 210
+      throughput_m_qps: 8.7
+    random_forest:
+      accuracy_pct: 92.3
+      fpr_pct: 0.42
+      latency_microseconds: 155
+      throughput_m_qps: 4.2
+
+  # Table 8 improvement column (vs CNN-LSTM).
+  # [thesis] Table 8.
+  table_8_improvement_vs_cnn_lstm:
+    accuracy_pct_points: 4.48
+    fpr_reduction_pct: 99.5
+    latency_reduction_pct: 62.8
+    throughput_increase_pct: 75.9
+    morph_time: "n/a (no baseline capability)"
+
+  # Table 8 improvement vs Random Forest (from the footnote).
+  # [thesis] Table 8 footnote.
+  table_8_improvement_vs_random_forest:
+    accuracy_pct_points: 7.68
+    fpr_reduction_pct: 99.8
+    latency_reduction_pct: 49.7
+    throughput_increase_pct: 264
+    morph_time: "n/a (no baseline capability)"
+
+  # Table 11: Table 8 restated for Section 3.14.
+  # [thesis] Table 11 footnote: "the figures are identical to those in
+  # Table 8 and should not be read as an independent experiment."
+  table_11:
+    identity_with_table_8: true
+    note: "Table 11 is a replica of Table 8 for reference in Section 3.14.
+           The artifact does not re-train for Table 11; table_11 reads
+           outputs/table_8.json and re-labels it."
+
+  # Table 12: Comparative defense efficacy vs. baseline method for each
+  # metric.
+  # [thesis] Table 12. Each row uses a DIFFERENT baseline (the best
+  # pre-MIRAGE method for that metric), not the same baseline across rows.
+  table_12:
+    attack_detection_time:
+      baseline: "120-150 ms (deep-learning anomaly detectors)"
+      mirage_doh: "22-35 ms (CMA + SGI)"
+      improvement_factor: 5.4
+      note: "This is not the same quantity as Table 8's latency; the
+             former includes the response, the latter measures only the
+             scoring step (Table 12 footnote)."
+    false_positive_rate:
+      baseline: "1.8% (rule-based anomaly detection)"
+      mirage_doh: "0.07% (adaptive learning)"
+      improvement_factor: 25.7
+    crypto_morph_time:
+      baseline: "N/A (static cryptographic models)"
+      mirage_doh: "3.8-9.5 ms (adaptive morphing)"
+      improvement_factor: "n/a (capability absent in static models)"
+    topological_recall:
+      baseline: "72.3% (standard anomaly detection)"
+      mirage_doh: "99.1% (persistent topological memory)"
+      improvement_factor: 1.37
+    spectral_precision:
+      baseline: "65.4% (flow-based classification)"
+      mirage_doh: "98.9% (SGI with spectral reinforcement learning)"
+      improvement_factor: 1.51
+
+
+# -----------------------------------------------------------------------------
+# 6. Fairness assertions
+# -----------------------------------------------------------------------------
+# These are the assertions the baseline scripts will check before, during,
+# and after training, to ensure Table 8's "same data, same preprocessing,
+# same tuning budget" claim is honest.
+
+fairness_assertions:
+
+  # Before training starts.
+  pre_training:
+    - "dataset_hash == mirage_doh.dataset_hash"          # same data
+    - "preprocessing_hash == mirage_doh.preprocessing_hash"  # same preprocessing
+    - "feature_count == 46"                              # Section 3.11.1
+    - "split_seed == 42"                                 # Section 3.11.1
+    - "train_val_test_proportions == [0.70, 0.15, 0.15]" # Section 3.11.1
+    - "tuning_budget.num_hyperparameter_candidates == mirage_doh.tuning_budget.num_hyperparameter_candidates"
+    - "tuning_budget.wall_clock_cap_hours == mirage_doh.tuning_budget.wall_clock_cap_hours"
+    - "tuning_budget.cross_validation == mirage_doh.tuning_budget.cross_validation"
+    - "tuning_seed == mirage_doh.seed"                   # Section 3.11.1
+
+  # After training completes.
+  post_training:
+    - "baseline_best_candidate exists in tuning log"      # no silent fallback
+    - "baseline_best_candidate was selected by selection_criterion"
+    - "all_candidates_metrics_logged == true"            # no cherry-picking
+    - "num_candidates_evaluated == num_hyperparameter_candidates"
+
+
+# -----------------------------------------------------------------------------
+# 7. CLI flag mapping (Tables 8, 11, 12)
+# -----------------------------------------------------------------------------
+# These map the exact CLI invocations in the thesis's reproduction
+# instructions to the config values.
+
+cli_flags:
+  train_cnn_lstm:
+    command: "python scripts/train_baselines.py --baseline cnn_lstm --full-data"
+    maps_to:
+      baselines.cnn_lstm: active
+      mode.data: "full"
+
+  train_random_forest:
+    command: "python scripts/train_baselines.py --baseline random_forest --full-data"
+    maps_to:
+      baselines.random_forest: active
+      mode.data: "full"
+
+  reproduce_table_8:
+    command: "python scripts/reproduce_tables/table_8_core_metrics.py --full-data"
+    maps_to:
+      baselines: [cnn_lstm, random_forest]
+      mode.data: "full"
+      output_manifest.tables.table_8: "outputs/tables/table_8_core_metrics.json"
+
+  reproduce_table_11:
+    command: "python scripts/reproduce_tables/table_11_core_metrics_repeated.py --from-table-8 outputs/tables/table_8_core_metrics.json"
+    maps_to:
+      reads: "outputs/tables/table_8_core_metrics.json"
+      writes: "outputs/tables/table_11_core_metrics_repeated.json"
+
+  reproduce_table_12:
+    command: "python scripts/reproduce_tables/table_12_comparative_defense.py --full-data"
+    maps_to:
+      baselines: [cnn_lstm, random_forest]
+      mode.data: "full"
+      output_manifest.tables.table_12: "outputs/tables/table_12_comparative_defense.json"
+
+
+# -----------------------------------------------------------------------------
+# 8. Notes on the missing baselines (Section 1.3.2)
+# -----------------------------------------------------------------------------
+#
+# The thesis is explicit that CNN-LSTM and Random Forest are the ONLY
+# baselines that were re-run. All other systems are quoted qualitatively
+# and NOT re-run. This block records that limitation so that a reviewer
+# who asks "why not compare against X?" finds the answer here.
+
+baselines_not_re_run:
+
+  rationale: |
+    "Section 1.3.2 and Section 7.3.2 of the thesis: 'Qualitative baselines
+     are the closest published systems ... no quantitative superiority
+     claim is made against them.' The artifact therefore only implements
+     CNN-LSTM and Random Forest, which are the two baselines the thesis
+     re-ran. All other comparisons in Tables 1-4 are qualitative."
+
+  systems_quoted_not_re_run:
+    - HERALD                          # Chapter 3, Table 3
+    - MTL-DoHTA                       # Chapter 3, Table 3
+    - ThreatGuard-DNS                 # Chapter 3, Table 3
+    - FL-DNSnet                       # Chapter 3, Table 3
+    - DNSGuard                        # Chapter 3, Table 3
+    - dProxy                          # Chapter 3, Table 3
+    - DoH-QKD                         # Chapter 3, Table 3
+    - Encrypted-DNS                   # Chapter 3, Table 3
+
+  why_not_re_run: |
+    "Each of these requires either a proprietary testbed, a private
+     dataset, or a codebase that is not publicly available. Re-running
+     them on the data used here would require re-implementing them,
+     which is beyond the scope of the artifact and would introduce
+     implementation choices that could not be verified against the
+     originals. The thesis explicitly chooses qualitative comparison
+     over re-implementation, per Section 7.3.2."
+
+  if_you_want_to_re_run_one: |
+    "If you have access to one of these systems and want to add it to the
+     artifact, add it under src/baselines/ and register it here. The
+     fairness_assertions above will enforce the same data / preprocessing /
+     tuning budget protocol used for CNN-LSTM and Random Forest."
+
+
+# -----------------------------------------------------------------------------
+# 9. Validation rules
+# -----------------------------------------------------------------------------
+# Consumed by src/utils/config_validator.py. A violation aborts the run
+# before any baseline training starts.
+
+validation:
+
+  # Numeric bounds.
+  num_hyperparameter_candidates: {min: 1, max: 1000}
+  wall_clock_cap_hours: {min: 0.1, max: 168.0}    # up to 1 week
+  num_folds: {min: 2, max: 20}
+
+  # CNN-LSTM specific.
+  cnn_lstm.sequence_window: {min: 8, max: 512}
+  cnn_lstm.batch_size: {min: 8, max: 512}
+  cnn_lstm.learning_rate: {min: 1.0e-6, max: 0.1}
+
+  # Random Forest specific.
+  random_forest.n_estimators: {min: 10, max: 5000}
+  random_forest.max_depth: {min: 2, max: 500, allow_null: true}
+
+  # Cross-field constraints. Every one of these maps to an explicit claim
+  # in the thesis or in the "fairness protocol" above.
+  _constraints:
+    # Table 8 footnote: "same data, same preprocessing, same tuning budget"
+    - "shared_protocol.feature_extraction == 'shared_with_mirage'"
+    - "shared_protocol.data_split == 'shared_with_mirage'"
+    - "shared_protocol.normalization == 'shared_with_mirage'"
+    - "shared_protocol.tuning_budget.num_hyperparameter_candidates > 0"
+    - "shared_protocol.tuning_budget.cross_validation.num_folds >= 2"
+    - "shared_protocol.tuning_seed == 42"       # Section 3.11.1
+    # Table 8: reported targets
+    - "cnn_lstm.reported_targets.accuracy_pct == 95.5"
+    - "cnn_lstm.reported_targets.fpr_pct == 0.15"
+    - "cnn_lstm.reported_targets.latency_microseconds == 210"
+    - "cnn_lstm.reported_targets.throughput_m_qps == 8.7"
+    - "random_forest.reported_targets.accuracy_pct == 92.3"
+    - "random_forest.reported_targets.fpr_pct == 0.42"
+    - "random_forest.reported_targets.latency_microseconds == 155"
+    - "random_forest.reported_targets.throughput_m_qps == 4.2"
+    # Table 8 footnote: improvement column is against CNN-LSTM only
+    - "improvement_computation.primary_baseline_for_improvement == 'cnn_lstm'"
+    # Table 8 footnote: morph time has no improvement ratio
+    - "'morph_time' in improvement_computation.metrics_with_no_ratio"
+    # Section 3.16: no per-class hypothesis tests reported
+    - "improvement_computation.hypothesis_tests.reported == false"
+
+
+# -----------------------------------------------------------------------------
+# 10. Runtime checks
+# -----------------------------------------------------------------------------
+
+runtime_check:
+  warn_if_cnn_lstm_training_over_hours: 4.0
+  warn_if_random_forest_training_over_hours: 1.0
+  assert_feature_count: 46                       # Section 3.11.1
+  assert_split_proportions: [0.70, 0.15, 0.15]   # Section 3.11.1
+  assert_tuning_seed: 42                         # Section 3.11.1
+  assert_no_silent_fallback: true                # if the best candidate
+                                                 # fails, raise; do not fall
+                                                 # back to defaults
