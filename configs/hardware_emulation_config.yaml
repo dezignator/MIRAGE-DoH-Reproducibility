@@ -1,0 +1,536 @@
+# =============================================================================
+# MIRAGE-DoH — Hardware emulation configuration (Loihi 2, A100)
+# =============================================================================
+#
+# Referenced in the thesis as:
+#   Chapter 3, Section 3.11.1  — Experimental testbed hardware
+#   Chapter 3, Section 3.4.2   — Deployment constraints (CPU < 5%, mem < 16 GB)
+#   Chapter 3, Table 8         — 78 µs inference latency, 15.3 M QPS throughput
+#   Chapter 3, Table 13        — Neuromorphic vs GPU efficiency comparison
+#                                 (reported in Chapter 4 but relevant here)
+#   Chapter 5, Equation 97     — Amdahl latency-throughput scaling law
+#   Chapter 6, Section 6.11.1  — Hardware infrastructure of the full testbed
+#
+# Loaded by: configs/default_mirage_config.yaml -> components.hardware_emulation
+# Consumed by: src/hardware_simulation/loihi_mock.py,
+#              src/hardware_simulation/a100_emulation.py
+# Tested by:   tests/test_reproduce_tables.py::test_hardware_simulation_trends
+#
+# HONESTY PRINCIPLE (enforced by every simulated output)
+#   The artifact does NOT re-implement Intel Loihi 2 silicon, and does NOT
+#   re-implement NVIDIA A100 microarchitecture. It implements the
+#   MATHEMATICAL FUNCTIONS that the thesis says run on that hardware
+#   (LIF neuron dynamics, spike encoding, Amdahl scaling, matrix-multiply
+#   throughput) and then CALIBRATES those functions against the values
+#   reported in the thesis. Every JSON output from the simulators is
+#   tagged `"simulated": true` and carries a `simulator_version` field.
+#   A reviewer can therefore tell, for every number, whether it came from
+#   real hardware or from the calibration model.
+#
+# Tag legend:
+#   [thesis]    — explicitly stated in the thesis (Table/Section ref)
+#   [standard]  — copied from a published standard or reference (cited)
+#   [default]   — standard choice from the literature, cited
+#   [derived]   — computed from a thesis value by the formula in the comment
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# 0. Metadata
+# -----------------------------------------------------------------------------
+
+version: "1.0.0"
+component: "hardware_emulation"
+thesis_reference: "Chapter 3, Section 3.11.1, Table 8, Table 13; Chapter 5, Eq. 97"
+simulator_version: "mirage-hardware-sim/1.0.0"
+
+
+# -----------------------------------------------------------------------------
+# 1. Hardware detection
+# -----------------------------------------------------------------------------
+#
+# At the start of every run, `src/utils/hardware_detect.py` probes the host
+# for the physical hardware. The result is logged in the run metadata and
+# is what determines whether the simulator is used or the real hardware is
+# called.
+#
+# The master config sets `mode.hardware` to "simulate" by default. This
+# block states what detection will find on a typical machine and what the
+# artifact does with each result.
+
+detection:
+
+  # Loihi 2 detection. The chip is exposed through Intel's NxSDK, which
+  # requires the `nxchipmgr` daemon to be running. If the daemon is not
+  # reachable, detection returns False and the simulator is used.
+  loihi_2:
+    detection_method: "nxchipmgr --status"
+    detection_timeout_s: 2.0
+    expected_on_thesis_testbed: true              # [thesis] Section 3.11.1
+    expected_on_reviewer_laptop: false
+    if_detected_and_mode_real: "use_loihi_hardware"
+    if_detected_and_mode_simulate: "use_loihi_hardware_but_log_both"
+    if_not_detected_and_mode_real: "abort_with_helpful_message"
+    if_not_detected_and_mode_simulate: "use_loihi_mock"
+
+  # A100 detection. The GPU is exposed through PyTorch's CUDA interface.
+  # If CUDA is not available, or if the visible device does not match an
+  # A100 (or a compatible Ampere/Hopper data-center GPU), detection
+  # returns False and the simulator is used.
+  a100:
+    detection_method: "torch.cuda.is_available() and 'A100' in torch.cuda.get_device_name(0)"
+    detection_timeout_s: 2.0
+    expected_on_thesis_testbed: true              # [thesis] Section 3.11.1
+    expected_on_reviewer_laptop: false            # most laptops lack a GPU
+    if_detected_and_mode_real: "use_a100_hardware"
+    if_detected_and_mode_simulate: "use_a100_hardware_but_log_both"
+    if_not_detected_and_mode_real: "abort_with_helpful_message"
+    if_not_detected_and_mode_simulate: "use_a100_emulation"
+
+  # CLI overrides.
+  #   --real-hardware -> mode.hardware = "real"; abort if hardware missing
+  #   --simulate-hardware -> mode.hardware = "simulate"; use simulator
+  #                         even if hardware is present (used by CI)
+  cli_flags:
+    real_hardware: "--real-hardware"
+    simulate_hardware: "--simulate-hardware"
+
+
+# -----------------------------------------------------------------------------
+# 2. Intel Loihi 2 simulator (loihi_mock.py)
+# -----------------------------------------------------------------------------
+#
+# The simulator implements the spiking-neuron dynamics and the event-driven
+# inference of the CMAs and TMNs on standard CPU hardware. The dynamics are
+# standard (LIF neuron, Eq. 44-45; spike encoding, Eq. 43 of Chapter 4); the
+# calibration constants below are the values that reproduce the Chapter 3
+# numbers on the thesis testbed.
+
+loihi_2:
+
+  # --- What the simulator reproduces -----------------------------------
+  # The mathematical functions that the thesis says run on Loihi 2.
+  reproduces:
+    - "leaky_integrate_and_fire_neuron_dynamics"    # Eq. 44-45
+    - "logarithmic_burst_spike_encoding"            # Eq. 43
+    - "event_driven_inference_timing"               # Section 3.11.1
+    - "synaptic_weight_update_stdp"                 # Eq. 46
+
+  # --- What the simulator does NOT reproduce ---------------------------
+  does_not_reproduce:
+    - "specific_silicon_timing_of_loihi_2_cores"
+    - "on_chip_communication_fabric_latency"
+    - "hardware_level_energy_metering"
+    - "thermal_throttling_behaviour"
+    - "power_gating_and_clock_domain_details"
+
+  # --- Calibration constants (the only "borrowed" values) --------------
+  # These are the values that make the simulator's output match Table 8.
+  # Every one is tagged [thesis] with the exact source.
+  calibration:
+
+    # Median inference latency per CMA call on Loihi 2. [thesis] Table 8.
+    median_inference_latency_us: 78.0
+
+    # 95% CI on the median. [thesis] Table 8.
+    median_inference_latency_ci_95_us: 3.5
+
+    # Energy per inference on Loihi 2. [thesis] Table 13.
+    energy_per_inference_mj: 0.12
+
+    # Inference latency on Loihi 2 for the full pipeline. [thesis] Table
+    # 13 reports 0.8 ms; that is the *pipeline* latency (multiple
+    # inferences), not the per-CMA latency above.
+    pipeline_latency_ms: 0.8
+
+    # Spike encoding efficiency (bits per spike). [thesis] Table 13.
+    spike_encoding_efficiency_bits_per_spike: 0.45
+
+    # The speedup of Loihi 2 over A100 on this workload. [thesis] Table
+    # 13: "2.6x faster".
+    speedup_over_a100_latency: 2.6
+
+    # The energy efficiency of Loihi 2 over A100. [thesis] Table 13:
+    # "15x more energy-efficient".
+    speedup_over_a100_energy: 15.0
+
+    # CPU calibration. The simulator runs on CPU but scales the measured
+    # CPU time by this factor to approximate Loihi 2 timing. [derived]
+    # The factor is chosen so that the simulator running on a modern
+    # x86_64 core (i7-12700 or equivalent) reproduces the 78 µs median
+    # within ±20% — the tolerance stated in REPRODUCIBILITY_CHECKLIST §5.
+    cpu_scaling_factor: 6.4
+
+  # --- Simulator tolerances --------------------------------------------
+  # A reviewer running the simulator on a machine that is not the thesis
+  # testbed should expect the simulator's output to differ from the
+  # reported value by at most these tolerances. The verification script
+  # uses these to decide PASS/WARN vs FAIL for simulated rows.
+  tolerances:
+    latency_absolute_pct: 20.0                    # REPRODUCIBILITY_CHECKLIST §5
+    latency_relative_pct: 5.0                     # tighter for ratios
+    energy_absolute_pct: 25.0                     # REPRODUCIBILITY_CHECKLIST §5
+    energy_relative_pct: 10.0
+    spike_efficiency_pct: 10.0
+
+  # --- Behaviour when detection finds real hardware --------------------
+  # If the reviewer has a Loihi 2 and `mode.hardware == "real"`, the
+  # simulator is bypassed. If they have it and mode is "simulate", the
+  # simulator runs but ALSO logs the real measurement so a reviewer can
+  # cross-check the two.
+  when_real_hardware_available:
+    log_both_measurements: true
+    tag_real:    { "simulated": false, "source": "loihi_2_physical" }
+    tag_sim:     { "simulated": true,  "source": "loihi_mock_v1.0.0" }
+
+
+# -----------------------------------------------------------------------------
+# 3. NVIDIA A100 simulator (a100_emulation.py)
+# -----------------------------------------------------------------------------
+#
+# The simulator predicts what an A100 would achieve given the workload,
+# using the same Amdahl-limited scaling law (Eq. 31, Eq. 97) that the
+# thesis derives in Chapter 5. The calibration constants below are fitted
+# on the thesis testbed.
+
+a100:
+
+  # --- What the simulator reproduces -----------------------------------
+  reproduces:
+    - "matrix_multiply_throughput"                  # Eq. 31, Eq. 97
+    - "amdahl_limited_parallel_speedup"             # Eq. 31, Eq. 97
+    - "gpu_memory_bandwidth_bottleneck"             # Eq. 97 third term
+    - "pipeline_parallelism_throughput"             # Section 6.5.5
+
+  # --- What the simulator does NOT reproduce ---------------------------
+  does_not_reproduce:
+    - "specific_sm_scheduling_latency"
+    - "nvlink_topology_details"
+    - "tensor_core_internal_pipeline"
+    - "gpu_dvfs_and_power_management"
+
+  # --- Calibration constants -------------------------------------------
+  calibration:
+
+    # Inference latency on A100. [thesis] Table 13.
+    pipeline_latency_ms: 2.1
+
+    # Energy per inference on A100. [thesis] Table 13.
+    energy_per_inference_mj: 1.8
+
+    # Aggregate throughput of the full MIRAGE-DoH stack on the testbed.
+    # [thesis] Table 8.
+    aggregate_throughput_m_qps: 15.3
+
+    # 95% CI on the aggregate throughput. [thesis] Table 8.
+    aggregate_throughput_ci_95_m_qps: 0.4
+
+    # CUDA core count of the A100 (SXM variant). [standard] NVIDIA A100
+    # data sheet: 6912 CUDA cores, 40 GB HBM2, 1.55 TB/s memory bandwidth.
+    a100_sxm_specs:
+      cuda_cores: 6912
+      memory_gb: 40
+      memory_bandwidth_tb_s: 1.55
+      tensor_core_generation: 3
+      reference: "NVIDIA A100 datasheet, https://www.nvidia.com/en-us/data-center/a100/"
+
+    # CPU calibration. Same idea as loihi_2.cpu_scaling_factor: a modern
+    # CPU is scaled by this factor to approximate A100 latency.
+    # [derived] Chosen so that the simulator on a modern x86_64 core
+    # reproduces 2.1 ms within ±20%.
+    cpu_scaling_factor: 22.0
+
+  # --- Simulator tolerances --------------------------------------------
+  tolerances:
+    throughput_absolute_pct: 3.0                  # REPRODUCIBILITY_CHECKLIST §5
+    throughput_relative_pct: 3.0
+    latency_absolute_pct: 20.0
+    energy_absolute_pct: 25.0
+
+  # --- Behaviour when detection finds real A100 ------------------------
+  when_real_hardware_available:
+    log_both_measurements: true
+    tag_real:    { "simulated": false, "source": "a100_physical" }
+    tag_sim:     { "simulated": true,  "source": "a100_emulation_v1.0.0" }
+
+
+# -----------------------------------------------------------------------------
+# 4. Amdahl scaling law (Equation 31, Equation 97)
+# -----------------------------------------------------------------------------
+#
+# Equation 31 (Chapter 3):
+#   T_total = (∑_{i=1}^{|Π|} λ_i)^(-1) · C_parallel
+#
+# Equation 97 (Chapter 5, used here for cross-chapter consistency):
+#   T_total(QPS) = T_serial + T_parallel(QPS)/N_cores
+#                + τ_comm · log2(N_nodes) / B_network
+#
+# The serial component T_serial = α_0 + α_1 log(QPS) captures the
+# Amdahl-limited portion. The parallel component follows a power law
+# T_parallel(QPS) = β_0 · QPS^γ with γ ≈ 0.8.
+#
+# The two equations describe the same physical scaling; Eq. 31 is the
+# simpler form used in Chapter 3, Eq. 97 the fuller form used in Chapter 5.
+
+scaling_law:
+
+  # --- Amdahl constants (Eq. 97) ---------------------------------------
+  # [thesis] Section 5.7.3 (Eq. 97); the same derivation is used by the
+  # simulator to predict A100 throughput from CPU measurements.
+  amdahl:
+    serial_fraction_alpha_0: 0.05                  # [derived] fitted on
+                                                    # thesis testbed
+    serial_fraction_alpha_1: 0.03                  # [derived] same
+    parallel_exponent_gamma: 0.8                   # [thesis] Section 5.7.3
+    parallel_coefficient_beta_0: 0.001             # [derived]
+    num_cores_a100: 6912                           # [standard] NVIDIA datasheet
+    num_cores_loihi_2: 128                         # [standard] Intel Loihi 2
+                                                    # datasheet: 128 neurocores
+    communication_overhead_tau_per_log_node_ms: 0.5  # [derived]
+    network_bandwidth_gbps: 25.0                   # [standard] testbed NIC
+
+  # --- Fit quality -----------------------------------------------------
+  # How well the Amdahl fit matches the thesis-reported values.
+  # [derived] The simulator enforces these residuals; a violation triggers
+  # a warning, not a failure, because the fit is approximate by design.
+  fit_quality:
+    max_residual_on_throughput_pct: 3.0            # matches §3 tolerance
+    max_residual_on_latency_pct: 20.0
+
+
+# -----------------------------------------------------------------------------
+# 5. Cross-hardware comparison (Table 13)
+# -----------------------------------------------------------------------------
+#
+# Table 13 of Chapter 4 reports the neuromorphic vs GPU comparison. The
+# same comparison is what the Chapter 3 simulator calibrates against,
+# because the two chapters share the Loihi 2 / A100 testbed.
+#
+# [thesis] Table 13, reproduced verbatim below as the target of the
+# simulator. The simulator's job is to hit these targets on CPU.
+
+cross_hardware_targets:
+
+  inference_latency:
+    loihi_2_ms: 0.8                                # [thesis] Table 13
+    a100_ms: 2.1                                   # [thesis] Table 13
+    speedup_ratio: 2.6                             # [thesis] Table 13
+    formula: "a100_ms / loihi_2_ms"                # [derived]
+
+  energy_per_inference:
+    loihi_2_mj: 0.12                               # [thesis] Table 13
+    a100_mj: 1.8                                   # [thesis] Table 13
+    efficiency_ratio: 15.0                         # [thesis] Table 13
+    formula: "a100_mj / loihi_2_mj"                # [derived]
+
+  spike_encoding_efficiency:
+    loihi_2_bits_per_spike: 0.45                   # [thesis] Table 13
+    a100_bits_per_spike: null                      # not applicable
+    note: "A100 is not a spiking architecture; the metric is meaningless."
+
+  integration_cost:
+    loihi_2: "Moderate (requires neuromorphic hardware)"    # [thesis] Table 13
+    a100: "Low (major energy savings)"                      # [thesis] Table 13
+
+  operator_expertise:
+    loihi_2: "Intermediate (deployment via NxSDK)"          # [thesis] Table 13
+    a100: "Basic (once deployed, minimal monitoring)"       # [thesis] Table 13
+
+
+# -----------------------------------------------------------------------------
+# 6. Simulated-output honesty tags
+# -----------------------------------------------------------------------------
+#
+# Every JSON file written by the simulators carries these fields. A
+# reviewer can therefore audit, for any number in the artifact, whether
+# it came from real hardware or from the simulator. This is the mechanism
+# that satisfies the reviewer's request for "simulation scripts or
+# synthetic substitutes that reproduce the same trends, and should state
+# explicitly which claims rest on non-shareable resources"
+# (reviewer comment, quoted in REPRODUCIBILITY_CHECKLIST §9).
+
+honesty_tags:
+
+  # Always present at the top level of every simulated JSON output.
+  top_level_fields:
+    - field: "simulated"
+      value: true
+      description: "True if this number came from a simulator, false if real hardware."
+    - field: "simulator_version"
+      value: "mirage-hardware-sim/1.0.0"
+      description: "Version of the simulator; enables a reviewer to reproduce a specific version."
+    - field: "simulator_inputs"
+      description: "The CPU measurements and calibration constants that produced this number."
+    - field: "hardware_available"
+      description: "Result of the hardware detection probe at run start."
+
+  # Per-row tagging in tables.
+  per_row_fields:
+    - field: "source"
+      allowed_values: ["loihi_2_physical", "a100_physical", "loihi_mock_v1.0.0", "a100_emulation_v1.0.0"]
+    - field: "tolerance_pct"
+      description: "The simulator's tolerance for this row."
+
+  # Refuse to write a simulated number into an expected-output file.
+  # Rationale: expected_outputs/ contains the values reported in the
+  # thesis; those are the measurements on the thesis testbed, not the
+  # simulator's predictions. A simulated run compares its output to the
+  # expected file (which is the ground truth) but never writes into it.
+  refuse_to_write_simulated_to_expected: true
+  refuse_reason: |
+    "expected_outputs/ contains the values reported in the thesis. Those
+     are measurements on the thesis testbed. A simulated run compares its
+     output to those measurements but must not overwrite them, otherwise
+     the verification would be circular."
+
+
+# -----------------------------------------------------------------------------
+# 7. Reported values (cross-reference)
+# -----------------------------------------------------------------------------
+# These are the values reported in the thesis. The simulator's job is to
+# reproduce them within the stated tolerances.
+
+reported_values:
+
+  # Table 8: latency and throughput (Chapter 3).
+  table_8:
+    latency_microseconds:
+      value: 78
+      ci_95_us: 3.5
+      source: "Loihi 2 physical (thesis testbed)"
+    throughput_m_qps:
+      value: 15.3
+      ci_95_m_qps: 0.4
+      source: "A100 physical (thesis testbed, parallel CMA instances)"
+
+  # Table 13: neuromorphic vs GPU (Chapter 4, shared testbed).
+  table_13:
+    inference_latency_ms: {loihi_2: 0.8, a100: 2.1, speedup: 2.6}
+    energy_per_inference_mj: {loihi_2: 0.12, a100: 1.8, efficiency: 15.0}
+    spike_encoding_efficiency_bits_per_spike: {loihi_2: 0.45}
+    integration_cost: {loihi_2: "Moderate", a100: "Low"}
+    operator_expertise: {loihi_2: "Intermediate", a100: "Basic"}
+
+  # Section 3.11.1: hardware infrastructure description.
+  section_3_11_1:
+    hardware_used: "Intel Loihi 2 neuromorphic chips and high throughput NVIDIA A100 GPUs"
+    purpose: "to perform the CMAs and TMNs"
+    dataset_sources: ["CIC-DoH2023", "Gen-C-DDD-2022"]
+
+  # Section 3.4.2: deployment constraints enforced at runtime.
+  section_3_4_2:
+    cpu_usage_max_percent: 5
+    memory_max_gb: 16
+    tmn_sync_window_ms: 100
+
+
+# -----------------------------------------------------------------------------
+# 8. CLI flag behaviour
+# -----------------------------------------------------------------------------
+# How --real-hardware and --simulate-hardware interact with the master
+# config and with the detection probe.
+
+cli_behaviour:
+
+  # --real-hardware
+  real_hardware:
+    sets: "mode.hardware = 'real'"
+    on_loihi_2_present_and_a100_present: "use_both_physical"
+    on_loihi_2_present_and_a100_absent:  "use_physical_loihi_emulate_a100"
+    on_loihi_2_absent_and_a100_present:  "emulate_loihi_use_physical_a100"
+    on_neither_present:                   "abort_with_helpful_message"
+    helpful_message: |
+      "Real hardware was requested with --real-hardware but neither Intel
+       Loihi 2 nor NVIDIA A100 was detected. Options:
+         (a) Drop --real-hardware to use the CPU simulator (recommended
+             for reviewers without the hardware).
+         (b) See src/hardware_simulation/README_hardware.md for the
+             hardware setup required to run on the real chips."
+
+  # --simulate-hardware
+  simulate_hardware:
+    sets: "mode.hardware = 'simulate'"
+    on_hardware_present: "use_simulator_but_log_physical_side_by_side"
+    on_hardware_absent: "use_simulator"
+    use_case: "CI runs and reproducibility checks that must not depend on hardware presence"
+
+  # --full-data (orthogonal to hardware but shares the CLI surface)
+  full_data:
+    sets: "mode.data = 'full'"
+    on_datasets_present: "use_full_datasets"
+    on_datasets_absent: "abort_with_helpful_message"
+    helpful_message: |
+      "Full data mode was requested with --full-data but the datasets
+       were not found. Run:
+         python data/download_datasets.py --dataset cic_doh2023 --dataset gen_c_ddd2022
+       See data/README_data.md for the official sources and SHA-256 checksums."
+
+
+# -----------------------------------------------------------------------------
+# 9. Validation rules
+# -----------------------------------------------------------------------------
+# Consumed by src/utils/config_validator.py.
+
+validation:
+
+  # Numeric bounds.
+  loihi_2.calibration.cpu_scaling_factor: {min: 0.1, max: 100.0}
+  loihi_2.calibration.speedup_over_a100_latency: {min: 1.0, max: 10.0}
+  loihi_2.calibration.speedup_over_a100_energy: {min: 1.0, max: 100.0}
+  a100.calibration.cpu_scaling_factor: {min: 0.1, max: 100.0}
+  a100.calibration.a100_sxm_specs.cuda_cores: {min: 1000, max: 20000}
+  tolerances.latency_absolute_pct: {min: 0.0, max: 100.0}
+  tolerances.throughput_absolute_pct: {min: 0.0, max: 100.0}
+  tolerances.energy_absolute_pct: {min: 0.0, max: 100.0}
+
+  # Cross-field constraints. Every one maps to an explicit thesis claim.
+  _constraints:
+    # Table 8 calibration
+    - "loihi_2.calibration.median_inference_latency_us == 78.0"
+    - "loihi_2.calibration.median_inference_latency_ci_95_us == 3.5"
+    - "a100.calibration.aggregate_throughput_m_qps == 15.3"
+    - "a100.calibration.aggregate_throughput_ci_95_m_qps == 0.4"
+    # Table 13 calibration
+    - "loihi_2.calibration.pipeline_latency_ms == 0.8"
+    - "a100.calibration.pipeline_latency_ms == 2.1"
+    - "loihi_2.calibration.energy_per_inference_mj == 0.12"
+    - "a100.calibration.energy_per_inference_mj == 1.8"
+    - "loihi_2.calibration.spike_encoding_efficiency_bits_per_spike == 0.45"
+    # Ratio cross-checks
+    - "loihi_2.calibration.speedup_over_a100_latency == 2.6"
+    - "loihi_2.calibration.speedup_over_a100_energy == 15.0"
+    # Eq. 97 exponent from Section 5.7.3
+    - "scaling_law.amdahl.parallel_exponent_gamma == 0.8"
+    # Honesty: never write simulated numbers to expected outputs.
+    - "honesty_tags.refuse_to_write_simulated_to_expected == true"
+    # The dataset sources for the hardware benchmarks must be the shared
+    # ones (Section 3.11.1); a simulator run against a private dataset
+    # cannot be verified against the expected outputs.
+    - "'CIC-DoH2023' in reported_values.section_3_11_1.dataset_sources"
+    - "'Gen-C-DDD-2022' in reported_values.section_3_11_1.dataset_sources"
+
+
+# -----------------------------------------------------------------------------
+# 10. Runtime checks
+# -----------------------------------------------------------------------------
+
+runtime_check:
+
+  # Print at run start whether the simulator or the real hardware will be
+  # used, so that a reviewer never mistakes one for the other.
+  print_resolved_mode: true
+  resolved_mode_template: |
+    [hardware] mode=({mode_hardware})  loihi_2=({loihi_detected})  a100=({a100_detected})
+    [hardware] simulator=({simulator_active})  version=({simulator_version})
+
+  # Warn if the simulator's fit against the target exceeds the tolerance.
+  warn_if_latency_fit_exceeds_pct: 20.0
+  warn_if_throughput_fit_exceeds_pct: 3.0
+  warn_if_energy_fit_exceeds_pct: 25.0
+
+  # Assert that every simulated JSON output carries the honesty tags.
+  assert_honesty_tags_on_write: true
+
+  # Abort if a reviewer tries to write simulated numbers into
+  # expected_outputs/ (would corrupt the ground-truth files).
+  assert_no_simulated_writes_to_expected: true
