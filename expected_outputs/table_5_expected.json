@@ -1,0 +1,5 @@
+{
+  "pi_0": {"name": "Π₀ — lowest threat level", "lattice_kem": "ml_kem_768", "second_kem": "x25519", "nist_category": 3, "lambda_pq_min_bits": 192, "morph_time_ms": 3.8, "cli_level": "L0"},
+  "pi_1": {"name": "Π₁ — intermediate threat level", "lattice_kem": "ml_kem_1024", "second_kem": "x25519", "nist_category": 5, "lambda_pq_min_bits": 256, "morph_time_ms": 6.0, "cli_level": "L1"},
+  "pi_2": {"name": "Π₂ — highest threat level", "lattice_kem": "ml_kem_1024", "second_kem": "classic_mceliece", "nist_category": 5, "lambda_pq_min_bits": 256, "morph_time_ms": 9.5, "cli_level": "L2"}
+}
