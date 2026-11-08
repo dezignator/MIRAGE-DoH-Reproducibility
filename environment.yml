@@ -1,0 +1,268 @@
+# =============================================================================
+# MIRAGE-DoH Reproducibility Artifact — Conda environment
+# =============================================================================
+#
+# Recommended install path for the FULL reproduction (Tables 8-12, Figures 2-6
+# on the 32 GB corpus). For the 2-minute toy demo on Colab, use
+# requirements.txt instead.
+#
+# Why conda for the full reproduction:
+#   - Ships compiled BLAS/LAPACK/MKL binaries, so numpy/scipy/torch are
+#     linked against the same numerics libraries on every platform. This
+#     removes a well-known source of small numerical drift in the
+#     differential-privacy and persistent-homology computations.
+#   - Ships the graphviz system binary, which is needed for Figure 1
+#     but is not a Python package.
+#   - Ships openmpi/fftw as optional accelerators if the reviewer wants
+#     to run the Dask preprocessing of the 32 GB corpus in parallel
+#     (Chapter 6, Section 6.13 of the thesis; used here for consistency).
+#   - Isolates the artifact from any system-installed Python, which is
+#     important because pycryptodome and ripser both have C extensions
+#     that can conflict with system libraries.
+#
+# Install:
+#     conda env create -f environment.yml
+#     conda activate mirage-doh
+#     pip install -e .          # editable install of src/ (see setup.py)
+#
+# Update after a requirements.txt change:
+#     conda env update -f environment.yml --prune
+#
+# Export the exact resolved environment for the reviewer's record:
+#     conda env export --no-builds > environment_lock.yml
+#
+# Tested on: Linux x86_64 (Ubuntu 22.04 LTS, the thesis testbed OS),
+#            macOS 13/14 (arm64 and x86_64),
+#            Windows 11 (x86_64, WSL2 recommended).
+# =============================================================================
+
+name: mirage-doh
+channels:
+  - conda-forge      # primary; all packages below are on conda-forge
+  - pytorch          # official PyTorch channel; used only if conda-forge's
+                     # torch lags behind by a patch version
+  - defaults
+dependencies:
+
+  # ---------------------------------------------------------------------------
+  # 1. Python interpreter
+  #    3.10 is the recommended version: it is the version on which every
+  #    dependency below has a published conda-forge build for all three
+  #    platforms (Linux, macOS, Windows), and it is the version used on the
+  #    thesis testbed (Ubuntu 22.04 LTS default python3.10). 3.9 also works
+  #    but some conda-forge builds of gudhi lag for 3.9. 3.11 works but
+  #    pycryptodome on conda-forge is still catching up.
+  # ---------------------------------------------------------------------------
+  - python=3.10
+
+  # ---------------------------------------------------------------------------
+  # 2. Core scientific stack
+  #    These are the numerically sensitive packages. Pinning the exact
+  #    version here (and the corresponding BLAS backend below) is what makes
+  #    the artifact bit-reproducible for the reported numbers.
+  # ---------------------------------------------------------------------------
+  - numpy=1.26.4
+  - scipy=1.13.1
+  - pandas=2.2.2
+  - openblas=0.3.27        # BLAS backend linked into numpy/scipy
+  - liblapack=3.9.0        # LAPACK backend
+
+  # ---------------------------------------------------------------------------
+  # 3. Deep learning
+  #    torch and torchvision are pulled from conda-forge for consistency.
+  #    If conda-forge lags behind PyPI by a patch version at the time you
+  #    install, uncomment the pytorch-channel variant at the bottom of this
+  #    file and comment the two lines below instead.
+  # ---------------------------------------------------------------------------
+  - pytorch=2.3.1
+  - torchvision=0.18.1
+  - torchaudio=2.3.1
+
+  # ---------------------------------------------------------------------------
+  # 4. Classical machine learning
+  # ---------------------------------------------------------------------------
+  - scikit-learn=1.5.0
+  - joblib=1.4.2
+
+  # ---------------------------------------------------------------------------
+  # 5. Topological data analysis (TMN)
+  #    gudhi, ripser and persim all ship compiled C++ extensions on conda-forge.
+  #    This is the main practical reason to prefer conda over pip for the
+  #    full reproduction: pip builds of ripser sometimes link against a
+  #    different LAPACK than the one numpy uses, producing small numerical
+  #    differences in the persistence-diagram distances of Table 17.
+  # ---------------------------------------------------------------------------
+  - gudhi=3.10.0
+  - ripser=0.6.12
+  - persim=0.3.7
+
+  # ---------------------------------------------------------------------------
+  # 6. Neuromorphic simulation (hardware_simulation/loihi_mock.py)
+  #    brian2 ships on conda-forge. snntorch does not, so it is in the pip
+  #    section at the end (see section 12).
+  # ---------------------------------------------------------------------------
+  - brian2=2.7.1
+
+  # ---------------------------------------------------------------------------
+  # 7. Graph analysis (SGI)
+  # ---------------------------------------------------------------------------
+  - networkx=3.3
+  - python-igraph=0.11.5
+
+  # ---------------------------------------------------------------------------
+  # 8. Cryptographic references (MCS)
+  # ---------------------------------------------------------------------------
+  - pycryptodome=3.20.0
+
+  # ---------------------------------------------------------------------------
+  # 9. Visualisation
+  #    matplotlib and seaborn are Python packages; graphviz provides BOTH
+  #    the Python package AND the system `dot` binary needed by
+  #    figures_src/figure_1.dot. Having the binary installed by conda means
+  #    the reviewer does not need to `apt-get install graphviz` or
+  #    `brew install graphviz`.
+  # ---------------------------------------------------------------------------
+  - matplotlib=3.9.0
+  - seaborn=0.13.2
+  - graphviz=9.0.0
+  - python-graphviz=0.20.3   # Python binding; distinct from the binary above
+
+  # ---------------------------------------------------------------------------
+  # 10. Configuration
+  # ---------------------------------------------------------------------------
+  - pyyaml=6.0.1
+
+  # ---------------------------------------------------------------------------
+  # 11. Data handling and parallel preprocessing
+  #     dask + distributed enable the Dask parallel preprocessing pipeline
+  #     used in data/preprocess_*.py. requests is used by
+  #     data/download_datasets.py with HTTP resume support.
+  # ---------------------------------------------------------------------------
+  - requests=2.32.3
+  - dask=2024.6.0
+  - distributed=2024.6.0
+
+  # ---------------------------------------------------------------------------
+  # 12. Testing and utilities
+  # ---------------------------------------------------------------------------
+  - pytest=8.2.2
+  - pytest-cov=5.0.0
+  - tqdm=4.66.4
+  - packaging=24.1
+  - psutil=6.0.0
+
+  # ---------------------------------------------------------------------------
+  # 13. Pip-only dependencies
+  #     These are not on conda-forge (as of the thesis submission) and must
+  #     be installed via pip inside the conda environment. The pip section
+  #     runs automatically when `conda env create` reaches it.
+  #
+  #     snntorch: the spiking neural network library used to reproduce the
+  #               LIF neuron dynamics (Eq. 44-45) and the spike-encoding
+  #               scheme (Eq. 43) of Chapter 3 on CPU.
+  #
+  #     The pip packages below are pinned to the same versions as
+  #     requirements.txt. If you change one, change both files together.
+  # ---------------------------------------------------------------------------
+  - pip
+  - pip:
+      - snntorch==0.9.1
+      # pycryptodome is installed by conda above; no pip duplicate needed.
+      # Every other dependency of requirements.txt is covered by conda above.
+
+# =============================================================================
+# OPTIONAL ACCELERATORS — uncomment to enable
+# =============================================================================
+#
+# --- Intel MKL (better BLAS than openblas on Intel CPUs) -----------------
+# Replace `openblas=0.3.27` above with:
+#   - mkl=2024.1
+#   - mkl-service=2.4.0
+# and set `numpy` to a variant linked against MKL (conda will do this
+# automatically if mkl is in the same env).
+#
+# --- CUDA 11.8 (for NVIDIA A100 / any CUDA-capable GPU) ------------------
+# Uncomment the following three lines and comment `pytorch=2.3.1` and
+# `torchvision=0.18.1` above:
+#   - pytorch-gpu=2.3.1
+#   - cudatoolkit=11.8
+#   - cudnn=8.9
+#
+# --- CUDA 12.1 (for newer GPUs, e.g. RTX 40-series) ----------------------
+#   - pytorch-gpu=2.3.1
+#   - cuda-toolkit=12.1
+#
+# --- Intel Loihi 2 (requires INRC membership, not on conda-forge) --------
+# Install separately from the Intel-provided SDK zip:
+#   pip install <intel>/nxsdk-1.0.0-py3-none-any.whl
+#
+# The artifact runs end-to-end on CPU. GPU and Loihi are accelerators, not
+# requirements. The hardware_simulation/ modules reproduce the corresponding
+# trends on CPU when the hardware is absent
+# (see REPRODUCIBILITY_CHECKLIST.md §5).
+#
+# --- PyTorch channel fallback (if conda-forge lags) ----------------------
+# If `conda-forge::pytorch=2.3.1` is not yet available when you install,
+# replace the two lines with the pytorch-channel variants:
+#   - pytorch::pytorch=2.3.1
+#   - pytorch::torchvision=0.18.1
+#   - pytorch::torchaudio=2.3.1
+# =============================================================================
+
+# =============================================================================
+# PLATFORM NOTES
+# =============================================================================
+#
+# Linux x86_64 (Ubuntu 22.04 LTS, thesis testbed):
+#   Works out of the box. This is the reference platform.
+#
+# macOS (arm64 — Apple Silicon):
+#   conda-forge has native arm64 builds of every package above.
+#   torch uses the MPS backend automatically if available; for the full
+#   reproduction we recommend forcing CPU by setting
+#   PYTHONHASHSEED and running with --cpu-only. Numbers in Tables 8-12
+#   are within the stated tolerance of the CPU reference.
+#
+# macOS (x86_64 — Intel Macs):
+#   conda-forge builds available; expect slower training by 2-4x vs. Linux.
+#   The toy demo completes in ~5 min instead of 2 min.
+#
+# Windows 11:
+#   Recommended: WSL2 with Ubuntu 22.04, then follow the Linux instructions.
+#   Native Windows: conda-forge works, but pycryptodome and ripser may need
+#   Visual Studio Build Tools 2019+ if a wheel is not available for your
+#   Python version. WSL2 avoids this entirely.
+#
+# Google Colab:
+#   Colab is Ubuntu, so this file works as-is, but requires conda to be
+#   installed first (Colab ships without it). For a 2-minute Colab run,
+#   use `pip install -r requirements.txt` instead — no conda needed.
+# =============================================================================
+
+# =============================================================================
+# VERIFICATION AFTER INSTALL
+# =============================================================================
+#
+# After `conda env create -f environment.yml` and `conda activate mirage-doh`,
+# run:
+#
+#     python -c "import numpy, scipy, torch, gudhi, ripser, persim, snntorch, networkx, igraph, sklearn, matplotlib, seaborn, yaml, requests, dask, pytest; print('all imports OK')"
+#
+# Expected output: `all imports OK`
+#
+# Then run the toy demo to confirm the artifact works end-to-end:
+#
+#     python scripts/train_mirage.py --config configs/default_mirage_config.yaml
+#     python expected_outputs/verification_script.py --toy-mode
+#
+# Expected output: a per-row PASS/WARN summary as described in
+# REPRODUCIBILITY_CHECKLIST.md §3.4.
+#
+# If any import fails, capture the output of:
+#
+#     conda list
+#     pip list
+#     conda env export --no-builds
+#
+# and open a GitHub issue (see README.md §13).
+# =============================================================================
