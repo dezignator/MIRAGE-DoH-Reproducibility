@@ -1,1 +1,468 @@
 
+# =============================================================================
+# MIRAGE-DoH — Master configuration
+# =============================================================================
+#
+# This file is the entry point for every run. Every other config under
+# configs/ is referenced from the `components:` block below. Override any
+# value by passing the corresponding CLI flag to a script (see
+# `scripts/train_mirage.py --help`), or by editing this file in a local clone.
+#
+# Referenced in the thesis as:
+#   Chapter 3, Section 3.11.1 (experimental testbed and dataset configuration)
+#   Chapter 3, Section 3.4.2  (deployment environment and resource bounds)
+#   Chapter 3, Section 1.7.2  (threat model boundaries)
+#
+# Companion files (each is a sub-config, referenced under `components:`):
+#   configs/cma_hyperparameters.yaml       Eq. 1-5,   Section 3.5
+#   configs/tmn_hyperparameters.yaml       Eq. 6-10,  Section 3.6
+#   configs/mcs_crypto_params.yaml         Eq. 11-13, Section 3.7
+#   configs/cce_simulation_params.yaml     Eq. 14-16, Section 3.8
+#   configs/sgi_dqn_config.yaml            Eq. 17-21, Section 3.9
+#   configs/baselines_config.yaml          Section 3.13, Tables 8, 11
+#   configs/hardware_emulation_config.yaml Sections 3.11.1, 5 (Loihi, A100)
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# 1. Metadata
+# -----------------------------------------------------------------------------
+# Identifies which version of the artifact and which version of the thesis
+# this config corresponds to. Written into every JSON output file so that a
+# reviewer can verify which run produced which number.
+
+version: "1.0.0"
+thesis_chapter: "Chapter 3"
+thesis_doi: "10.1109/TNSM.2026.3677474"
+thesis_date: "2026-11-30"
+
+
+# -----------------------------------------------------------------------------
+# 2. Reproducibility
+# -----------------------------------------------------------------------------
+# Every script calls src/utils/seed.py::seed_everything(seed) before touching
+# numpy, torch, random, or CUDA. Two runs with the same seed and the same
+# config produce byte-identical output files (see REPRODUCIBILITY_CHECKLIST
+# §7 for the caveat about Random Forest's n_jobs scheduling).
+
+seed: 42
+determinism: strict             # {strict, warn, off}; passed to
+                                # torch.use_deterministic_algorithms.
+                                # `strict` may raise on some GPU kernels;
+                                # use `warn` if you hit that.
+enable_math_determinism: true   # Sets CUDA determinism flags when CUDA is
+                                # available. Harmless on CPU.
+
+
+# -----------------------------------------------------------------------------
+# 3. Execution mode
+# -----------------------------------------------------------------------------
+# Two orthogonal switches:
+#
+#   data: "toy"       1 MB subset (2-minute smoke test; any machine)
+#         "full"      32 GB CIC-DoH2023 + Gen-C-DDD-2022 (2-4 hours)
+#
+#   hardware: "simulate"  CPU software simulation of Loihi 2 and A100
+#             "real"      Actual hardware (requires INRC membership for
+#                         Loihi 2; requires a CUDA GPU for A100)
+#
+# Overridable by CLI flags:
+#   scripts/train_mirage.py ... --full-data       (sets data: "full")
+#   scripts/reproduce_tables/*.py ... --full-data (same)
+#   scripts/train_mirage.py ... --real-hardware   (sets hardware: "real")
+#
+# The default is toy + simulate so that the reviewer's first run works on a
+# laptop or Colab. See REPRODUCIBILITY_CHECKLIST §3 for the toy-vs-full
+# accuracy difference (85-90% toy vs 99.98% full).
+
+mode:
+  data: "toy"
+  hardware: "simulate"
+
+  # If `data: "full"` is set but the datasets are not present, the code
+  # fails fast with a message pointing to data/download_datasets.py.
+  # If `hardware: "real"` is set but Loihi 2 or A100 is not detected, the
+  # code fails fast with a message pointing to
+  # src/hardware_simulation/README_hardware.md. Both behaviours are
+  # deliberate: silent fallback would make it impossible to know whether a
+  # reported number is measured or simulated.
+  fail_fast_on_missing_data: true
+  fail_fast_on_missing_hardware: true
+
+
+# -----------------------------------------------------------------------------
+# 4. Paths
+# -----------------------------------------------------------------------------
+# All paths are relative to the repository root, matching the layout in
+# README.md §2. Absolute paths are accepted for `outputs:` only (useful when
+# bind-mounting into Docker; see Dockerfile).
+
+paths:
+  data_root: "data/"
+  toy_dataset: "data/toy_dataset/"
+  raw_datasets: "data/raw/"
+  processed_datasets: "data/processed/"
+
+  outputs: "outputs/"
+  checkpoints: "outputs/checkpoints/"
+  logs: "outputs/logs/"
+  figures: "outputs/figures/"
+  tables: "outputs/tables/"
+
+  expected: "expected_outputs/"
+  configs: "configs/"
+  figures_src: "figures_src/"
+
+
+# -----------------------------------------------------------------------------
+# 5. Datasets
+# -----------------------------------------------------------------------------
+# The full corpora are downloaded from their official public sources by
+# data/download_datasets.py. Neither is redistributed in this repo (see
+# LICENSE notes and REPRODUCIBILITY_CHECKLIST §6).
+#
+# SHA-256 values are verified after download; a mismatch aborts with an
+# error rather than proceeding with corrupted data.
+
+datasets:
+  cic_doh2023:
+    name: "CIC-DoHBRW-2023"
+    expected_size_gb: 22
+    url: "https://www.unb.ca/cic/datasets/dohbrw-2023.html"
+    licence: "CC-BY 4.0"
+    attribution: "Canadian Institute for Cybersecurity, University of New Brunswick"
+    sha256_manifest: "data/README_data.md"   # checksums listed there
+    preprocess_script: "data/preprocess_cic_doh2023.py"
+
+  gen_c_ddd2022:
+    name: "Gen-C-DDD-2022"
+    expected_size_gb: 10
+    url: "https://www.unb.ca/cic/datasets/dns-2022.html"
+    licence: "CC-BY 4.0"
+    attribution: "Canadian Institute for Cybersecurity, University of New Brunswick"
+    sha256_manifest: "data/README_data.md"
+    preprocess_script: "data/preprocess_gen_c_ddd2022.py"
+
+  toy:
+    name: "MIRAGE-DoH toy subset"
+    benign_rows: 1000
+    malicious_rows: 1000
+    total_rows: 2000
+    source: "stratified sample of CIC-DoH2023 + Gen-C-DDD-2022 after preprocessing"
+    seed: 42                       # must match `seed:` above
+    benign_file: "data/toy_dataset/benign_sample.csv"
+    malicious_file: "data/toy_dataset/malicious_sample.csv"
+    checksums_file: "data/toy_dataset/CHECKSUMS.txt"
+
+  # Split proportions are identical for toy and full runs (the toy dataset
+  # is too small for 15% test split to be statistically meaningful, so the
+  # toy mode uses a smaller test fraction; see REPRODUCIBILITY_CHECKLIST
+  # §3.2 for the reasoning).
+  split:
+    train: 0.70
+    validation: 0.15
+    test: 0.15
+    stratify_by: "class"           # preserve class balance in every split
+    temporal_holdout: true         # last capture window held out for test
+                                   # (thesis §3.11.1, §7.3.7 on external
+                                   # validity — the temporal holdout is what
+                                   # makes the test split distinct from the
+                                   # training distribution)
+    seed: 42
+
+
+# -----------------------------------------------------------------------------
+# 6. Component sub-configs
+# -----------------------------------------------------------------------------
+# Each value points to a file under configs/. The file is loaded at run time
+# and merged into the master config under the corresponding component key.
+# An empty string disables the component (used only by the optional
+# per-component ablation in tests/test_reproduce_tables.py::test_ablate).
+#
+# To run without the Causal Counterfactual Environment, for example:
+#   python scripts/train_mirage.py --disable cce
+# which is equivalent to setting components.cce: "" here.
+
+components:
+  cma:              "configs/cma_hyperparameters.yaml"
+  tmn:              "configs/tmn_hyperparameters.yaml"
+  mcs:              "configs/mcs_crypto_params.yaml"
+  cce:              "configs/cce_simulation_params.yaml"
+  sgi:              "configs/sgi_dqn_config.yaml"
+  baselines:        "configs/baselines_config.yaml"
+  hardware_emulation: "configs/hardware_emulation_config.yaml"
+
+
+# -----------------------------------------------------------------------------
+# 7. Training protocol
+# -----------------------------------------------------------------------------
+# Values here mirror the thesis Section 3.11-3.13. The 100-epoch budget is
+# the one used in Figure 4 (Section 3.14) and is fixed across all four
+# components so that the trajectories are directly comparable.
+
+training:
+  total_epochs: 100              # Figure 4 shows epochs 1-100
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  optimizer: "adam"
+  lr_scheduler:
+    name: "cosine_annealing"
+    T_max: 100
+    eta_min: 0.00001
+  early_stopping:
+    enabled: false               # Figure 4 shows all 100 epochs; early
+                                 # stopping would truncate the trajectory
+                                 # and break the reported values
+    patience: 15
+    min_delta: 0.0001
+
+  # Grad clipping. Standard for CMA neuroevolution (Eq. 4 adaptive momentum
+  # under a Fisher-Rao metric is sensitive to gradient spikes).
+  gradient_clip_norm: 1.0
+
+  # Checkpoint policy: save at the end of each phase in Table 10
+  # (initialization, phase 1 static, phase 2 dynamic, phase 3 live).
+  save_checkpoints: true
+  checkpoint_interval: 1         # save every epoch; total checkpoints = 100
+  checkpoint_dir: "outputs/checkpoints/"
+
+  # The four-phase CMA curriculum (thesis Table 10). Each phase is a
+  # (data_seed, augmentation_set, num_epochs) triple. The curriculum is
+  # fixed: it is what makes the Table 10 trajectory reproducible on the
+  # toy dataset.
+  cma_curriculum:
+    - name: "initialization"
+      data_seed: 42
+      augmentations: ["none"]
+      num_epochs: 10
+      reported_metrics:                  # thesis Table 10 row 1
+        f1: 92.4
+        auc_roc: 0.934
+        novelty_detection_rate: 85.1
+        catastrophic_forgetting_rate: 8.3
+    - name: "phase_1_static"
+      data_seed: 43
+      augmentations: ["static_adversarial"]
+      num_epochs: 30
+      reported_metrics:                  # thesis Table 10 row 2
+        f1: 97.8
+        auc_roc: 0.982
+        novelty_detection_rate: 93.6
+        catastrophic_forgetting_rate: 2.1
+    - name: "phase_2_dynamic"
+      data_seed: 44
+      augmentations: ["dynamic_adversarial", "gan_flood"]
+      num_epochs: 30
+      reported_metrics:                  # thesis Table 10 row 3
+        f1: 99.1
+        auc_roc: 0.997
+        novelty_detection_rate: 98.5
+        catastrophic_forgetting_rate: 0.4
+    - name: "phase_3_live"
+      data_seed: 45
+      augmentations: ["dynamic_adversarial", "gan_flood", "topological_tunnel"]
+      num_epochs: 30
+      reported_metrics:                  # thesis Table 10 row 4
+        f1: 99.7
+        auc_roc: 0.999
+        novelty_detection_rate: 99.8
+        catastrophic_forgetting_rate: 0.0
+
+
+# -----------------------------------------------------------------------------
+# 8. Evaluation protocol
+# -----------------------------------------------------------------------------
+# Mirrors thesis Sections 3.13-3.16. The `report_per_class: false` is a
+# deliberate choice tied to Section 3.16 ("Significance was assessed with
+# confidence interval only; per-class sample counts and formal hypothesis
+# tests are not reported for this chapter"). Setting it to `true` would
+# fabricate numbers the thesis does not report — see REPRODUCIBILITY
+# CHECKLIST §9 (Known limitations, statistical reporting row).
+
+evaluation:
+  metrics:
+    - accuracy
+    - false_positive_rate
+    - precision
+    - recall
+    - f1_score
+    - auc_roc
+    - latency_p50_microseconds
+    - latency_p99_microseconds
+    - throughput_qps
+    - morph_time_ms
+    - topological_recall
+    - spectral_precision
+    - composite_threat_adaptivity_index   # Eq. 29
+    - quantum_resilience_mcs               # Eq. 28
+
+  confidence_intervals:
+    enabled: true
+    level: 0.95                  # "95% CI" as reported in Table 8 footnote
+    n_bootstrap: 1000
+    bootstrap_seed: 42
+
+  # Deliberately false. See section 3.16 of the thesis.
+  report_per_class: false
+
+  # Formal hypothesis tests are reported only for Table 10 (CMA convergence),
+  # where the thesis does report them, and for the two t-tests described in
+  # the Table 8 / Table 10 footnotes. For all other tables the thesis
+  # explicitly does not report them (Section 3.16).
+  hypothesis_tests:
+    table_10_convergence:
+      test: "mann_whitney_u"     # non-parametric, appropriate for the
+                                 # small phase-level sample sizes
+      alpha: 0.01
+    table_8_accuracy_vs_cnn_lstm:
+      test: "welch_t"            # the thesis reports a t-test in §6.16.2
+                                 # for the analogous Chapter 6 comparison;
+                                 # here we apply the same test to Chapter 3
+      alpha: 0.01
+    all_other_tables:
+      test: null                 # explicitly not reported; see §3.16
+
+  # Numbers are rounded to match the thesis presentation exactly:
+  # 2 decimals for accuracy / FPR in Tables 8-9, 4 decimals for the 0.0008%
+  # FPR of MIRAGE-DoH, integers for latency in microseconds, 1 decimal for
+  # throughput in M QPS.
+  rounding:
+    accuracy: 2
+    fpr: 4
+    latency_microseconds: 0
+    throughput_m_qps: 1
+    morph_time_ms: 1
+
+
+# -----------------------------------------------------------------------------
+# 9. Logging
+# -----------------------------------------------------------------------------
+# Every script emits two logs: a human-readable one to stdout (level=INFO)
+# and a JSON one to outputs/logs/<script_name>_<timestamp>.json for
+# automated diffing against expected_outputs/. Both are enabled by default
+# because the JSON log is what verification_script.py parses.
+
+logging:
+  level: "INFO"                  # {DEBUG, INFO, WARNING, ERROR}
+  format: "human+json"           # {human, json, human+json}
+  json_dir: "outputs/logs/"
+  per_run_subdir: true           # each run gets its own subdir with a
+                                 # run_metadata.json recording git commit,
+                                 # config hash, seed, and timestamp
+  log_config_hash: true          # store SHA-256 of the loaded config so a
+                                 # reviewer can prove which config produced
+                                 # which output
+
+
+# -----------------------------------------------------------------------------
+# 10. Deployment constraints (thesis Section 3.4.2)
+# -----------------------------------------------------------------------------
+# These bounds are what the thesis assumes when describing the deployment
+# environment. They are NOT enforced by the code (the code runs wherever you
+# run it); they are checked by scripts/train_mirage.py and reported in
+# outputs/deployment_check.json. A violation is a WARNING, not an error,
+# because a reviewer might legitimately want to run on a laptop with less
+# than 16 GB free.
+
+deployment:
+  cpu_usage_max_percent: 5       # thesis: "< 5% of available capacity"
+  memory_max_gb: 16              # thesis: "16 GB per instance"
+  tmn_sync_window_ms: 100        # thesis: "up to 100ms synchronization
+                                 # windows" for distributed TMN
+  queries_per_second_min: 1000   # thesis: "1,000 to 100,000 QPS"
+  queries_per_second_max: 100000
+  round_trip_time_ms_min: 5
+  round_trip_time_ms_max: 200
+  packet_loss_max_percent: 2
+
+
+# -----------------------------------------------------------------------------
+# 11. Threat model (thesis Section 1.7.2 and Section 3.4.1)
+# -----------------------------------------------------------------------------
+# What the artifact is allowed to see. Recorded here as documentation of the
+# boundary; the enforcement is in src/utils/math_utils.py::_assert_metadata_only,
+# called by every feature-extraction path.
+
+threat_model:
+  permitted_observables:
+    - packet_inter_arrival_time              # ±1 µs precision (thesis §1.7.2)
+    - query_size_distribution
+    - unidirectional_flow_characteristics
+    - tls_negotiation_parameters            # cipher suites ≤ 256 bits
+    - tls_extension_presence_indicators
+    - http3_frame_preparation_sequences
+
+  forbidden_observables:                     # never accessed by any code path
+    - query_payload_content
+    - response_payload_content
+    - application_layer_semantics
+    - database_information_from_responses
+
+  adversary_capabilities:
+    - polymorphic_traffic_shaping            # thesis §1.2.3
+    - multi_stage_tunneling
+    - adaptive_mimicry_via_gan
+    - protocol_downgrade                     # thesis §1.3.3
+    - quantum_key_harvesting                 # thesis §1.3.2
+    - timing_side_channel
+    - gan_generated_adversarial_queries
+
+  explicit_non_capabilities:                 # thesis §1.7.2
+    - tls_1_3_protocol_breakage
+    - private_key_recovery_via_direct_cryptanalysis
+    - physical_hardware_access
+    - nation_state_level_infrastructure_compromise
+
+
+# -----------------------------------------------------------------------------
+# 12. Output manifest
+# -----------------------------------------------------------------------------
+# Which files each script writes. The verification_script.py reads
+# `expected/`; a fresh run writes `outputs/`. Keeping this mapping in the
+# master config means adding a new table or figure only requires editing
+# this file, not the verification script.
+#
+# The full list is populated by the reproduce scripts themselves when they
+# load this config; the entries below are the canonical ones that
+# verification_script.py always checks.
+
+output_manifest:
+  tables:
+    table_5:  "outputs/tables/table_5_mcs_configs.json"
+    table_6:  "outputs/tables/table_6_attack_scenarios.json"
+    table_7:  "outputs/tables/table_7_defense_workflow.json"
+    table_8:  "outputs/tables/table_8_core_metrics.json"
+    table_9:  "outputs/tables/table_9_threat_mitigation.json"
+    table_10: "outputs/tables/table_10_cma_adaptive_learning.json"
+    table_11: "outputs/tables/table_11_core_metrics_repeated.json"
+    table_12: "outputs/tables/table_12_comparative_defense.json"
+  figures:
+    figure_1: "outputs/figures/figure_1_architecture.dot"
+    figure_2: "outputs/figures/figure_2_module_validation.csv"
+    figure_3: "outputs/figures/figure_3_traffic_dynamics.csv"
+    figure_4: "outputs/figures/figure_4_cognitive_learning.csv"
+    figure_5: "outputs/figures/figure_5_joint_optimization.csv"
+    figure_6: "outputs/figures/figure_6_adaptive_ai_attacks.csv"
+
+
+# -----------------------------------------------------------------------------
+# 13. Quick sanity output (printed to stdout at every run's start)
+# -----------------------------------------------------------------------------
+# A short banner printed to stdout so that the reviewer sees at a glance
+# which mode a run is in. No effect on computation.
+
+banner: |
+  ================================================================
+  MIRAGE-DoH  v1.0.0   (Chapter 3 reproducibility artifact)
+  ================================================================
+  Mode:            {mode_data} data  /  {mode_hardware} hardware
+  Seed:            {seed}
+  Config:          configs/default_mirage_config.yaml
+  Components:      {n_components} (CMA, TMN, MCS, CCE, SGI)
+  Baselines:       CNN-LSTM, Random Forest
+  ================================================================
+  Expected runtime and output on {mode_data} mode:
+    toy       ->  ~2 min,  accuracy 85-90%   (REPRODUCIBILITY_CHECKLIST §3)
+    full      ->  ~2-4 h,  accuracy 99.98%   (Table 8, thesis §3.13)
+  ================================================================
