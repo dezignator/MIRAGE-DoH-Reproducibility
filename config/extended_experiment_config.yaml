@@ -1,0 +1,104 @@
+# extended_experimentation/config/extended_experiment_config.yaml
+#
+# Consolidated configuration for the MIRAGE-DoH extended experimentation
+# suite. Each section corresponds to one pipeline stage; the values here
+# match the hyperparameter registries that the individual modules import.
+# Where a section lists a value that is also a module-level default, the
+# value here is the one the pipeline was actually run with.
+
+seed: 20231130
+
+campaign:
+  flows_per_benign_profile: 400
+  flows_per_attack_family: 400
+  protocols: [doh, dot, doq]
+  max_flow_packets: 1200
+  shaper:
+    size_morph_amplitude: 0.45
+    size_morph_period: 37.0
+    iat_jitter_ratio: 0.30
+    burst_probability: 0.08
+    burst_factor: 4.5
+    stage_count: 4
+    stage_gain: 1.8
+
+staged_tunneling:
+  default_scenario: dns_exfil_baseline
+  scenarios_run: all
+  resolver_affinity: 0.72
+
+tmn:
+  window_size_packets: 32
+  window_stride_packets: 16
+  max_points_per_window: 48
+  persistence_image_bins: 32
+  persistence_image_sigma: 0.08
+  embedding_dim: 64
+  lstm_hidden: 96
+  lstm_layers: 2
+  attention_heads: 4
+  dropout: 0.15
+  learning_rate: 8.0e-4
+  batch_size: 32
+  epochs: 24
+  patience: 4
+
+metaagent:
+  population_size: 24
+  generations: 18
+  hmc_steps: 12
+  hmc_step_size: 0.015
+  mutation_scale: 0.08
+  crossover_rate: 0.55
+  elitism: 2
+  epochs_per_generation: 2
+
+joint:
+  epochs: 8
+  learning_rate: 2.5e-4
+  batch_size: 64
+  patience: 3
+  acceptance_tolerance:
+    detection_accuracy: [0.9997, 0.9999]
+    false_positive_rate_fraction: [0.000005, 0.000012]
+
+mcs:
+  benchmark_iterations: 500
+  payload_bytes: 1024
+  transition_tolerance:
+    median_morph_ms: [7.8, 10.2]
+
+spectral:
+  graph_policy: service
+  edge_weight_metric: mutual_information
+  laplacian_normalisation: symmetric
+  embedding_dim: 16
+  hidden_dim: 128
+  num_layers: 3
+  learning_rate: 1.2e-3
+  epochs: 30
+  patience: 5
+
+evaluation:
+  bootstrap_resamples: 10000
+  permutation_resamples: 1000
+  alpha: 0.05
+  tolerance:
+    detection_accuracy: [0.9997, 0.9999]
+    false_positive_rate_fraction: [0.000005, 0.000012]
+    median_inference_latency_us: [72.0, 84.0]
+    p95_inference_latency_us: [95.0, 130.0]
+    p99_inference_latency_us: [120.0, 175.0]
+    throughput_qps: [13500000.0, 17000000.0]
+    cryptographic_adaptation_ms: [7.8, 10.2]
+
+ablation:
+  material_regression:
+    accuracy: -0.002
+    fpr: 0.000005
+    latency_us: 5.0
+  variants: [full, no_tmn, no_mcs, no_spectral, no_cce]
+
+runtime:
+  morph_cooldown_s: 1.0
+  dwell_scale: 1.0
